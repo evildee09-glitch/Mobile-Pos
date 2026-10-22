@@ -32,11 +32,10 @@ jobs:
       - name: Build debug APK
         run: |
           chmod +x ./gradlew
-          ./gradlew --no-daemon assembleDebug --info --stacktrace
+          ./gradlew --no-daemon assembleDebug -Pkotlin.compiler.execution.strategy=in-process
         env:
           ORG_GRADLE_PROJECT_org.gradle.jvmargs: "-Xmx3g -Dfile.encoding=UTF-8"
-          # This forces Kotlin compilation to happen in the main process so errors print directly to the console
-          ORG_GRADLE_PROJECT_kotlin.incremental.useClasspathSnapshot: "false"
+          
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
