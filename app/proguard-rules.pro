@@ -1,0 +1,1 @@
+-keep class ph.sarisari.mpos.data.** { *; }
