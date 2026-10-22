@@ -6,6 +6,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -108,8 +110,8 @@ fun ProductPickerDialog(products: List<ph.sarisari.mpos.data.Product>, onPick: (
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Choose a product") }, text = {
         Column {
             Field("Search", q, { q = it })
-            androidx.compose.foundation.lazy.LazyColumn(Modifier.heightIn(max = 360.dp)) {
-                androidx.compose.foundation.lazy.items(products.filter { q.isBlank() || it.name.contains(q, true) || it.barcode == q }.take(60), key = { it.id }) { p ->
+            LazyColumn(Modifier.heightIn(max = 360.dp)) {
+                items(products.filter { q.isBlank() || it.name.contains(q, true) || it.barcode == q }.take(60), key = { it.id }) { p ->
                     ListItem(headlineContent = { Text(p.name) }, leadingContent = { ProductAvatar(p.name, 36.dp) },
                         modifier = Modifier.clickableNoRipple { onPick(p); onDismiss() })
                 }
