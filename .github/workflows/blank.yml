@@ -32,7 +32,7 @@ jobs:
       - name: Build debug APK
         run: |
           chmod +x ./gradlew
-          ./gradlew --no-daemon assembleDebug --stacktrace
+          ./gradlew --no-daemon assembleDebug --info --stacktrace
         env:
           ORG_GRADLE_PROJECT_org.gradle.jvmargs: "-Xmx3g -Dfile.encoding=UTF-8"
 
