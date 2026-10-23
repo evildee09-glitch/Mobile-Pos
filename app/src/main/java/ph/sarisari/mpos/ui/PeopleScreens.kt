@@ -9,6 +9,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -51,7 +54,7 @@ fun CustomersScreen(vm: PosViewModel) {
         }
         val list = customers.filter { q.isBlank() || it.name.contains(q, true) }.sortedByDescending { balances[it.id] ?: 0 }
         if (list.isEmpty()) EmptyState("📒", "No customers yet", "Add regulars to track their utang.")
-        LazyColumn(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        LazyVerticalGrid(GridCells.Adaptive(340.dp), Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(list, key = { it.id }) { c ->
                 val b = balances[c.id] ?: 0
                 ElevatedCard(Modifier.fillMaxWidth().clickable { detail = c }, shape = RoundedCornerShape(18.dp)) {

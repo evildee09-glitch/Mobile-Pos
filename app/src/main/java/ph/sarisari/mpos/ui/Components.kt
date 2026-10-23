@@ -39,9 +39,15 @@ private val Dark = darkColorScheme(
     background = Color(0xFF101412), surface = Color(0xFF181D1A), surfaceVariant = Color(0xFF2A322E)
 )
 
+/** Cards use surfaceContainerLow / surfaceContainerHighest; making those translucent lets the background logo show through them. */
+private fun ColorScheme.glass() = copy(
+    surfaceContainerLow = surface.copy(alpha = 0.80f),
+    surfaceContainerHighest = surfaceVariant.copy(alpha = 0.80f)
+)
+
 @Composable
 fun PosTheme(content: @Composable () -> Unit) = MaterialTheme(
-    colorScheme = if (isSystemInDarkTheme()) Dark else Light,
+    colorScheme = (if (isSystemInDarkTheme()) Dark else Light).glass(),
     shapes = Shapes(small = RoundedCornerShape(10.dp), medium = RoundedCornerShape(16.dp), large = RoundedCornerShape(24.dp)),
     content = content
 )

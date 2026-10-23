@@ -2,6 +2,8 @@
 
 package ph.sarisari.mpos.ui
 
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -24,6 +26,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import ph.sarisari.mpos.R
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
@@ -47,14 +52,18 @@ fun PosRoot(vm: PosViewModel = viewModel()) {
     val user by vm.user.collectAsState(); val staff by vm.staff.collectAsState(); val toast by vm.toast.collectAsState()
     val snack = remember { SnackbarHostState() }
     LaunchedEffect(toast) { toast?.let { snack.showSnackbar(it); vm.toast.value = null } }
-    Scaffold(snackbarHost = { SnackbarHost(snack) }, containerColor = MaterialTheme.colorScheme.background) { pad ->
-        Box(Modifier.padding(pad).fillMaxSize()) {
-            val list = staff
-            when {
-                list == null -> CircularProgressIndicator(Modifier.align(Alignment.Center))
-                list.isEmpty() -> SetupScreen(vm)
-                user == null -> LoginScreen(vm, list)
-                else -> MainScreen(vm, user!!)
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        // Brand watermark behind every screen after login (login/setup show the logo itself).
+        if (user != null) Image(painterResource(R.drawable.logo), null, Modifier.fillMaxSize().padding(horizontal = 32.dp, vertical = 72.dp).alpha(0.16f), contentScale = ContentScale.Fit)
+        Scaffold(snackbarHost = { SnackbarHost(snack) }, containerColor = Color.Transparent) { pad ->
+            Box(Modifier.padding(pad).fillMaxSize()) {
+                val list = staff
+                when {
+                    list == null -> CircularProgressIndicator(Modifier.align(Alignment.Center))
+                    list.isEmpty() -> SetupScreen(vm)
+                    user == null -> LoginScreen(vm, list)
+                    else -> MainScreen(vm, user!!)
+                }
             }
         }
     }
@@ -64,7 +73,7 @@ fun PosRoot(vm: PosViewModel = viewModel()) {
 fun SetupScreen(vm: PosViewModel) {
     var name by remember { mutableStateOf("") }; var pin by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize().padding(28.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("🏪", fontSize = 56.sp)
+        Image(painterResource(R.drawable.logo), "Design to Deploy", Modifier.widthIn(max = 280.dp).fillMaxWidth(0.7f), contentScale = ContentScale.Fit)
         Text("Welcome!", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Text("Create the Owner account to begin. Works fully offline.", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 20.dp))
         Column(Modifier.widthIn(max = 420.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -80,7 +89,7 @@ fun SetupScreen(vm: PosViewModel) {
 fun LoginScreen(vm: PosViewModel, staff: List<Staff>) {
     var picked by remember { mutableStateOf<Staff?>(null) }
     Column(Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("🛒", fontSize = 48.sp, modifier = Modifier.padding(top = 24.dp))
+        Image(painterResource(R.drawable.logo), "Design to Deploy", Modifier.widthIn(max = 260.dp).fillMaxWidth(0.6f).padding(top = 16.dp), contentScale = ContentScale.Fit)
         Text("Who's working today?", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Text("Sino ang naka-duty?", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 16.dp))
         Column(Modifier.widthIn(max = 460.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -114,19 +123,32 @@ fun MainScreen(vm: PosViewModel, user: Staff) {
     var sel by rememberSaveable { mutableIntStateOf(0) }
     val cur = dests[sel.coerceIn(0, dests.size - 1)]
     val receipt by vm.lastReceipt.collectAsState(); val approval by vm.approvalNeeded.collectAsState()
-    Column(Modifier.fillMaxSize()) {
-        TopBar(vm, user)
-        Box(Modifier.weight(1f)) {
-            when (cur.key) {
-                "sell" -> CheckoutScreen(vm)
-                "stock" -> StockScreen(vm)
-                "utang" -> CustomersScreen(vm)
-                "shift" -> ShiftScreen(vm)
-                "more" -> MoreScreen(vm, user)
+    val wide = LocalConfiguration.current.screenWidthDp >= 600
+    val body: @Composable () -> Unit = {
+        val centered = cur.key == "shift" || cur.key == "more"
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+            Box(if (centered && wide) Modifier.widthIn(max = 900.dp).fillMaxSize() else Modifier.fillMaxSize()) {
+                when (cur.key) {
+                    "sell" -> CheckoutScreen(vm); "stock" -> StockScreen(vm); "utang" -> CustomersScreen(vm)
+                    "shift" -> ShiftScreen(vm); "more" -> MoreScreen(vm, user)
+                }
             }
         }
-        NavigationBar {
-            dests.forEachIndexed { i, d -> NavigationBarItem(selected = dests.indexOf(cur) == i, onClick = { sel = i }, icon = { Icon(d.icon, d.label) }, label = { Text(d.label) }) }
+    }
+    Column(Modifier.fillMaxSize()) {
+        TopBar(vm, user)
+        if (wide) Row(Modifier.weight(1f)) {
+            NavigationRail {
+                Spacer(Modifier.weight(1f))
+                dests.forEachIndexed { i, d -> NavigationRailItem(selected = dests.indexOf(cur) == i, onClick = { sel = i }, icon = { Icon(d.icon, d.label) }, label = { Text(d.label) }) }
+                Spacer(Modifier.weight(1f))
+            }
+            Box(Modifier.weight(1f)) { body() }
+        } else {
+            Box(Modifier.weight(1f)) { body() }
+            NavigationBar {
+                dests.forEachIndexed { i, d -> NavigationBarItem(selected = dests.indexOf(cur) == i, onClick = { sel = i }, icon = { Icon(d.icon, d.label) }, label = { Text(d.label) }) }
+            }
         }
     }
     receipt?.let { r -> TextDialog("Receipt", r, { vm.lastReceipt.value = null }) { TextButton({ vm.printReceipt(r, drawer = true) }) { Text("Print") } } }
@@ -144,7 +166,8 @@ fun TopBar(vm: PosViewModel, user: Staff) {
         else -> Color(0xFF1E9E5A) to "Offline-ready · saved on this device"
     }
     Surface(color = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary) {
-        Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        val tight = LocalConfiguration.current.screenHeightDp < 480
+        Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 16.dp, vertical = if (tight) 2.dp else 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(if (shift != null) "Shift open" else "No shift open", fontWeight = FontWeight.Bold, fontSize = 17.sp)
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -163,13 +186,13 @@ fun TopBar(vm: PosViewModel, user: Staff) {
 // ---------- checkout ----------
 @Composable
 fun CheckoutScreen(vm: PosViewModel) {
-    val wide = LocalConfiguration.current.screenWidthDp >= 720
+    val wide = LocalConfiguration.current.screenWidthDp >= 600
     val cart by vm.cart.collectAsState()
     var showCart by remember { mutableStateOf(false) }; var showScan by remember { mutableStateOf(false) }
     val total = (cart.sumOf { it.total } - vm.discount.collectAsState().value).coerceAtLeast(0)
     if (wide) Row(Modifier.fillMaxSize()) {
         CatalogPane(vm, { showScan = true }, Modifier.weight(1.3f).fillMaxHeight())
-        Surface(Modifier.weight(1f).fillMaxHeight(), tonalElevation = 2.dp) { CartPane(vm, Modifier.fillMaxSize()) }
+        Surface(Modifier.weight(1f).fillMaxHeight(), color = MaterialTheme.colorScheme.surface.copy(alpha = 0.86f)) { CartPane(vm, Modifier.fillMaxSize()) }
     } else Box(Modifier.fillMaxSize()) {
         CatalogPane(vm, { showScan = true }, Modifier.fillMaxSize().padding(bottom = if (cart.isEmpty()) 0.dp else 76.dp))
         if (cart.isNotEmpty()) Card(Modifier.align(Alignment.BottomCenter).padding(12.dp).fillMaxWidth().clickable { showCart = true }, shape = RoundedCornerShape(20.dp),
@@ -181,7 +204,7 @@ fun CheckoutScreen(vm: PosViewModel) {
             }
         }
     }
-    if (showCart && !wide) ModalBottomSheet(onDismissRequest = { showCart = false }) { CartPane(vm, Modifier.fillMaxWidth().heightIn(max = 640.dp)) }
+    if (showCart && !wide) ModalBottomSheet(onDismissRequest = { showCart = false }, containerColor = MaterialTheme.colorScheme.surface) { CartPane(vm, Modifier.fillMaxWidth().heightIn(max = 640.dp)) }
     if (showScan) ScannerDialog("Scan items", { code ->
         vm.scanBarcode(code)?.let { "✓ ${it.name} added · ${Money.format(it.priceCentavos)}" } ?: "Unknown barcode $code"
     }, { showScan = false }) {
@@ -239,10 +262,11 @@ fun CartPane(vm: PosViewModel, modifier: Modifier) {
     val subtotal = cart.sumOf { it.total }; val total = (subtotal - discount).coerceAtLeast(0)
     var showPay by remember { mutableStateOf(false) }; var custMenu by remember { mutableStateOf(false) }; var discDialog by remember { mutableStateOf(false) }
     var editQty by remember { mutableStateOf<Int?>(null) }
+    val compact = LocalConfiguration.current.screenHeightDp < 480
     Column(modifier.padding(12.dp)) {
-        Text("Current sale", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-        if (cart.isEmpty()) EmptyState("🧺", "Cart is empty", "Tap a product or scan a barcode")
-        LazyColumn(Modifier.weight(1f, fill = false), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (!compact) Text("Current sale", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        if (cart.isEmpty() && !compact) EmptyState("🧺", "Cart is empty", "Tap a product or scan a barcode")
+        LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             itemsIndexed(cart, key = { _, l -> l.product.id + l.unitName }) { i, l ->
                 val step = if (l.product.allowsFraction) 500L else 1000L
                 Card(shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))) {
@@ -265,25 +289,39 @@ fun CartPane(vm: PosViewModel, modifier: Modifier) {
             }
         }
         Spacer(Modifier.height(8.dp))
-        Box {
-            OutlinedButton({ custMenu = true }, Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
-                val c = customers.firstOrNull { it.id == custId }
-                Icon(Icons.Filled.Person, null); Spacer(Modifier.width(8.dp)); Text(c?.let { "${it.name} · owes ${Money.format(balances[it.id] ?: 0)}" } ?: "Customer (needed for Utang)", maxLines = 1)
+        val picker: @Composable () -> Unit = {
+            Box {
+                OutlinedButton({ custMenu = true }, Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
+                    val c = customers.firstOrNull { it.id == custId }
+                    Icon(Icons.Filled.Person, null); Spacer(Modifier.width(8.dp)); Text(c?.let { "${it.name} · owes ${Money.format(balances[it.id] ?: 0)}" } ?: "Customer (for Utang)", maxLines = 1)
+                }
+                DropdownMenu(custMenu, { custMenu = false }) {
+                    DropdownMenuItem(text = { Text("— none —") }, onClick = { vm.customerId.value = null; custMenu = false })
+                    customers.forEach { c -> DropdownMenuItem(text = { Text("${c.name}  ·  ${Money.format(balances[c.id] ?: 0)}") }, onClick = { vm.customerId.value = c.id; custMenu = false }) }
+                }
             }
-            DropdownMenu(custMenu, { custMenu = false }) {
-                DropdownMenuItem(text = { Text("— none —") }, onClick = { vm.customerId.value = null; custMenu = false })
-                customers.forEach { c -> DropdownMenuItem(text = { Text("${c.name}  ·  ${Money.format(balances[c.id] ?: 0)}") }, onClick = { vm.customerId.value = c.id; custMenu = false }) }
+        }
+        if (compact) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Box(Modifier.weight(1f)) { picker() }
+                TextButton({ discDialog = true }, enabled = cart.isNotEmpty()) { Text(if (discount > 0) "−${Money.format(discount)}" else "+ Disc") }
             }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(Money.format(total), Modifier.weight(1f), fontSize = 26.sp, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.primary)
+                Button({ showPay = true }, Modifier.height(50.dp), enabled = cart.isNotEmpty() && total > 0, shape = RoundedCornerShape(14.dp)) { Text("Charge", fontWeight = FontWeight.Bold) }
+            }
+        } else {
+            picker()
+            Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Subtotal ${Money.format(subtotal)}", Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                TextButton({ discDialog = true }, enabled = cart.isNotEmpty()) { Text(if (discount > 0) "Discount −${Money.format(discount)}" else "+ Discount") }
+            }
+            Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("TOTAL", Modifier.weight(1f), fontSize = 20.sp); Text(Money.format(total), fontSize = 32.sp, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.primary)
+            }
+            BigButton("Charge ${Money.format(total)}", { showPay = true }, enabled = cart.isNotEmpty() && total > 0)
         }
-        Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("Subtotal ${Money.format(subtotal)}", Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
-            TextButton({ discDialog = true }, enabled = cart.isNotEmpty()) { Text(if (discount > 0) "Discount −${Money.format(discount)}" else "+ Discount") }
-        }
-        Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("TOTAL", Modifier.weight(1f), fontSize = 20.sp); Text(Money.format(total), fontSize = 32.sp, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.primary)
-        }
-        BigButton("Charge ${Money.format(total)}", { showPay = true }, enabled = cart.isNotEmpty() && total > 0)
-        if (cart.isNotEmpty()) TextButton({ vm.clearCart() }, Modifier.align(Alignment.CenterHorizontally)) { Text("Clear cart") }
+        if (cart.isNotEmpty() && !compact) TextButton({ vm.clearCart() }, Modifier.align(Alignment.CenterHorizontally)) { Text("Clear cart") }
     }
     if (showPay) PaymentSheet(vm, total, custId, { showPay = false })
     editQty?.let { i -> cart.getOrNull(i)?.let { l ->
@@ -310,8 +348,8 @@ fun PaymentSheet(vm: PosViewModel, total: Long, customerId: String?, onDismiss: 
     val valid = g + m + s + u <= total && cashV >= due && (u == 0L || customerId != null) && (cashV > 0 || due <= 0)
     fun pesos(c: Long) = Money.format(c).removePrefix("₱").replace(",", "")
     fun remainingExcept(cur: Long) = (total - (g + m + s + u + cashV) + cur).coerceAtLeast(0)
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 24.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface) {
+        Column(Modifier.align(Alignment.CenterHorizontally).widthIn(max = 560.dp).padding(horizontal = 20.dp).padding(bottom = 24.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Amount to pay", color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(Money.format(total), fontSize = 40.sp, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.primary)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

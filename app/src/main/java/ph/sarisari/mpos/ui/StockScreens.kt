@@ -10,6 +10,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -60,7 +63,7 @@ fun StockScreen(vm: PosViewModel) {
                 Text("⚠ Low stock: " + low.joinToString { it.name }, Modifier.padding(12.dp), fontSize = 13.sp)
             }
             if (list.isEmpty()) EmptyState("📦", "No products yet", "Tap + New, scan a barcode, or import a CSV from More.")
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = if (selecting) 90.dp else 12.dp)) {
+            LazyVerticalGrid(GridCells.Adaptive(360.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = if (selecting) 90.dp else 12.dp)) {
                 items(list, key = { it.id }) { p ->
                     val out = p.stockMilli <= 0; val lowStock = !out && p.reorderMilli > 0 && p.stockMilli <= p.reorderMilli
                     ElevatedCard(Modifier.fillMaxWidth().clickable { if (selecting) selected = if (p.id in selected) selected - p.id else selected + p.id else if (vm.can(Perm.MANAGE_CATALOG)) edit = p }, shape = RoundedCornerShape(18.dp)) {
