@@ -116,7 +116,13 @@ class EscPosBluetoothPrinter(private val ctx: Context, private val mac: String) 
 /** ESC/POS over LAN (port 9100) — most Ethernet/Wi-Fi receipt printers. UNTESTED on real hardware. */
 class NetworkEscPosPrinter(private val host: String, private val port: Int = 9100) : ReceiptPrinter {
     override suspend fun printRaw(bytes: ByteArray): Result<Unit> = withContext(Dispatchers.IO) {
-        runCatching { Socket().use { s -> s.connect(InetSocketAddress(host, port), 4000); s.getOutputStream().apply { write(bytes); flush() } } }
+        runCatching { 
+            Socket().use { s -> 
+                s.connect(InetSocketAddress(host, port), 4000)
+                s.getOutputStream().apply { write(bytes); flush() } 
+            }
+            Unit // Explicitly return Unit
+        }
     }
 
     override suspend fun print(text: String, openDrawer: Boolean): Result<Unit> = withContext(Dispatchers.IO) {
@@ -124,10 +130,14 @@ class NetworkEscPosPrinter(private val host: String, private val port: Int = 910
             Socket().use { s ->
                 s.connect(InetSocketAddress(host, port), 4000)
                 val out = s.getOutputStream()
-                out.write(byteArrayOf(0x1B, 0x40)); out.write(text.replace("₱", "P").toByteArray(Charsets.ISO_8859_1)); out.write("\n\n\n".toByteArray())
+                out.write(byteArrayOf(0x1B, 0x40))
+                out.write(text.replace("₱", "P").toByteArray(Charsets.ISO_8859_1))
+                out.write("\n\n\n".toByteArray())
                 if (openDrawer) out.write(byteArrayOf(0x1B, 0x70, 0x00, 0x19, 0xFA.toByte()))
-                out.write(byteArrayOf(0x1D, 0x56, 0x42, 0x00)); out.flush()
+                out.write(byteArrayOf(0x1D, 0x56, 0x42, 0x00))
+                out.flush()
             }
+            Unit // Explicitly return Unit
         }
     }
 }
