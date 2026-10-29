@@ -15,6 +15,8 @@ enum class LedgerType { CHARGE, PAYMENT, ADJUSTMENT, REVERSAL }
 enum class MoveType { SALE, RECEIPT, ADJUSTMENT, DAMAGED, EXPIRED, LOST, RETURN, VOID_RESTOCK }
 enum class CashMoveType { ADD, WITHDRAW, EXPENSE }
 enum class SyncStatus { PENDING, SYNCED, FAILED }
+enum class PromoType { BUNDLE, BUY_X_GET_Y, PERCENT_OFF, VOLUME_PRICE }
+enum class ServiceType { CASH_IN, CASH_OUT, LOAD, BILLS }
 enum class PoStatus { DRAFT, ORDERED, PARTIAL, RECEIVED, CANCELLED }
 
 @Entity(
@@ -293,3 +295,40 @@ data class ReminderLog(
 /** Remote sync events already applied on this device (idempotent apply). */
 @Entity(tableName = "applied_events")
 data class AppliedEvent(@PrimaryKey val id: String, val appliedAt: Long)
+
+/** GCash/Maya cash-in, cash-out, e-load and bills payment done at the counter. Only the DRAWER effect and the shop's fee are tracked (not wallet balances). */
+@Entity(tableName = "service_txns", indices = [Index("shiftId"), Index("createdAt")])
+data class ServiceTxn(
+    @PrimaryKey val id: String, val shiftId: String, val staffId: String, val type: ServiceType, val provider: String,
+    val amountCentavos: Long, val feeCentavos: Long, val feeInCash: Boolean,
+    val cashInCentavos: Long, val cashOutCentavos: Long,        // drawer effect, computed once at record time
+    val customerName: String?, val reference: String?, val createdAt: Long,
+    val voided: Boolean = false, val voidReason: String? = null
+)
+
+/** Automatic price rule for ONE product, in its base unit. BUNDLE: qtyMilli pieces for valueCentavos. BUY_X_GET_Y: buy qtyMilli, get freeQtyMilli free.
+ *  PERCENT_OFF: percentBp/100 %. VOLUME_PRICE: from qtyMilli pieces, each costs valueCentavos. Dates are ISO yyyy-MM-dd (inclusive), null = open. */
+@Entity(tableName = "promos", indices = [Index("productId"), Index("active")])
+data class Promo(
+    @PrimaryKey val id: String, val name: String, val type: PromoType, val productId: String,
+    val qtyMilli: Long = 0, val valueCentavos: Long = 0, val freeQtyMilli: Long = 0, val percentBp: Long = 0,
+    val startDate: String? = null, val endDate: String? = null, val active: Boolean = true, val createdAt: Long
+)
+
+/** A bill from a supplier. Balance = amount - payments. */
+@Entity(tableName = "supplier_bills", indices = [Index("supplierId"), Index("dueDate")])
+data class SupplierBill(
+    @PrimaryKey val id: String, val supplierId: String?, val poId: String?, val reference: String?,
+    val amountCentavos: Long, val dueDate: String?, val note: String?, val staffId: String, val createdAt: Long, val cancelled: Boolean = false
+)
+
+@Entity(
+    tableName = "supplier_payments",
+    foreignKeys = [ForeignKey(entity = SupplierBill::class, parentColumns = ["id"], childColumns = ["billId"])],
+    indices = [Index("billId")]
+)
+data class SupplierPayment(
+    @PrimaryKey val id: String, val billId: String, val amountCentavos: Long,
+    val method: String,                       // CASH_DRAWER (also recorded as a shift expense), GCASH, BANK, OTHER
+    val staffId: String, val createdAt: Long, val shiftId: String? = null
+)

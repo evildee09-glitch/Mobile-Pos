@@ -5,6 +5,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import ph.sarisari.mpos.data.*
 import ph.sarisari.mpos.sync.SyncCodec
+import ph.sarisari.mpos.util.Expiry
 import ph.sarisari.mpos.util.Manila
 import ph.sarisari.mpos.util.Money
 import ph.sarisari.mpos.util.Qty
@@ -22,7 +23,8 @@ data class CheckoutRequest(
     val discountCentavos: Long = 0,
     val payments: List<PaymentInput> = emptyList(),   // cash amount = amount TENDERED
     val creditCentavos: Long = 0,
-    val approverId: String? = null                    // owner who approved a discount / credit-limit override
+    val approverId: String? = null,                   // owner who approved a discount / credit-limit override
+    val applyPromos: Boolean = false                  // Premium: apply active promos/bundles automatically
 )
 
 data class CheckoutResult(val sale: Sale, val payments: List<Payment>, val changeCentavos: Long, val duplicate: Boolean)
@@ -45,6 +47,7 @@ class SalesService(private val db: AppDatabase, private val clock: () -> Long = 
 
         val resolved = req.lines.map { l ->
             val p = catalog.get(l.productId)?.takeIf { it.active } ?: throw PosException.InvalidCart("Unknown or inactive product")
+            Expiry.daysLeft(p.expiryDate)?.let { if (it < 0) throw PosException.InvalidCart("${p.name} expired on ${p.expiryDate} — take it off the shelf") }
             if (l.qtyMilli <= 0) throw PosException.InvalidCart("Quantity must be positive")
             if (!p.allowsFraction && l.qtyMilli % 1000 != 0L) throw PosException.InvalidCart("${p.name} cannot be sold in fractions")
             val unit: String; val factor: Long; val price: Long
@@ -58,9 +61,11 @@ class SalesService(private val db: AppDatabase, private val clock: () -> Long = 
             Resolved(p, unit, factor, price, l.qtyMilli, base, Qty.lineTotal(price, l.qtyMilli))
         }
         val subtotal = resolved.sumOf { it.total }
-        if (req.discountCentavos < 0 || req.discountCentavos > subtotal) throw PosException.InvalidCart("Invalid discount")
+        val promo = if (req.applyPromos) PromoEngine.compute(resolved.filter { it.unit == it.product.baseUnit }.map { PromoLine(it.product.id, it.qty, it.price) }, catalog.activePromos(), Expiry.today().toString()) else PromoResult(0, emptyList())
+        val promoDisc = promo.totalDiscount
+        if (req.discountCentavos < 0 || req.discountCentavos > subtotal - promoDisc) throw PosException.InvalidCart("Invalid discount")
         if (req.discountCentavos > 0 && !authorized(Perm.DISCOUNT)) throw PosException.PermissionDenied(Perm.DISCOUNT)
-        val total = subtotal - req.discountCentavos
+        val total = subtotal - req.discountCentavos - promoDisc
         if (total <= 0) throw PosException.InvalidCart("Total must be above zero")
 
         // payments
@@ -84,13 +89,14 @@ class SalesService(private val db: AppDatabase, private val clock: () -> Long = 
             }
         }
         if (req.discountCentavos > 0) db.audit(approver?.id ?: cashier.id, "DISCOUNT", "sale", saleId, Money.format(req.discountCentavos), now)
+        if (promoDisc > 0) db.audit(cashier.id, "PROMO", "sale", saleId, promo.applied.joinToString() + " " + Money.format(promoDisc), now)
 
         val seq = (admin.setting("receipt_seq")?.toLongOrNull() ?: 0L) + 1
         admin.putSetting(AppSetting("receipt_seq", seq.toString()))
         val dev = (admin.setting("device_id") ?: "0000").take(4).uppercase()
         val receipt = "$dev-${Manila.dayKey(now)}-${"%05d".format(seq)}"
 
-        val sale = Sale(saleId, receipt, customerId ?: req.customerId, cashier.id, shift.id, subtotal, req.discountCentavos, total,
+        val sale = Sale(saleId, receipt, customerId ?: req.customerId, cashier.id, shift.id, subtotal, req.discountCentavos + promoDisc, total,
             req.creditCentavos, SaleStatus.COMPLETED, now)
         sales.insertSale(sale)
         val itemRows = resolved.map {
@@ -176,6 +182,7 @@ class InventoryService(private val db: AppDatabase, private val clock: () -> Lon
         val actor = db.requirePerm(actorId, Perm.MANAGE_CATALOG)
         if (p.name.isBlank() || p.priceCentavos < 0 || p.costCentavos < 0) throw PosException.Invalid("Invalid product")
         units.forEach { if (it.factorMilli <= 0 || it.unitName.isBlank() || it.unitName == p.baseUnit) throw PosException.Invalid("Invalid unit conversion") }
+        if (p.expiryDate != null && Expiry.parse(p.expiryDate) == null) throw PosException.Invalid("Expiry date must look like 2026-12-31")
         val old = db.catalog().get(p.id)
         val now = clock()
         if (old == null) db.catalog().insert(p.copy(createdAt = now, updatedAt = now))
@@ -190,10 +197,11 @@ class InventoryService(private val db: AppDatabase, private val clock: () -> Lon
     }
 
     /** Stock rises only when goods are actually received and this transaction commits. */
-    suspend fun receiveStock(productId: String, unitName: String?, qtyMilli: Long, unitCostCentavos: Long, supplierId: String?, reference: String?, staffId: String, poId: String? = null): StockReceipt =
+    suspend fun receiveStock(productId: String, unitName: String?, qtyMilli: Long, unitCostCentavos: Long, supplierId: String?, reference: String?, staffId: String, poId: String? = null, expiryDate: String? = null, batchNo: String? = null): StockReceipt =
         db.withTransaction {
             val staff = db.requirePerm(staffId, Perm.STOCK_ADJUST)
             val p = db.catalog().get(productId) ?: throw PosException.Invalid("Unknown product")
+            if (expiryDate != null && Expiry.parse(expiryDate) == null) throw PosException.Invalid("Expiry date must look like 2026-12-31")
             if (qtyMilli <= 0) throw PosException.Invalid("Quantity must be positive")
             val unit: String; val factor: Long
             if (unitName == null || unitName == p.baseUnit) { unit = p.baseUnit; factor = 1000 }
@@ -204,7 +212,12 @@ class InventoryService(private val db: AppDatabase, private val clock: () -> Lon
             db.catalog().addStock(productId, base, now)
             val mv = InventoryMovement(UUID.randomUUID().toString(), productId, MoveType.RECEIPT, base, r.id, staff.id, reference, now)
             db.catalog().insertMovement(mv)
-            if (unitCostCentavos > 0) db.catalog().update(db.catalog().get(productId)!!.copy(costCentavos = (unitCostCentavos * 1000 + factor / 2) / factor, updatedAt = now))
+            // nearest expiry wins (sell oldest first): a new delivery only replaces the date when the shelf is empty or the new date is earlier-or-equal
+            val cur = db.catalog().get(productId)!!
+            val newExp = when { expiryDate == null -> cur.expiryDate; p.stockMilli <= 0 || cur.expiryDate == null -> expiryDate; else -> minOf(cur.expiryDate!!, expiryDate) }
+            val upd = cur.copy(costCentavos = if (unitCostCentavos > 0) (unitCostCentavos * 1000 + factor / 2) / factor else cur.costCentavos, expiryDate = newExp,
+                batchNo = if (expiryDate != null && newExp == expiryDate) (batchNo ?: cur.batchNo) else cur.batchNo, updatedAt = now)
+            if (upd != cur) { db.catalog().update(upd); db.enqueue("PRODUCT", productId, "UPSERT", SyncCodec.product(upd, db.catalog().unitsFor(productId)), now) }
             db.enqueue("STOCK", mv.id, "DELTA", JSONObject().put("move", SyncCodec.move(mv)).put("receipt", SyncCodec.receipt(r)), now)
             r
         }
@@ -274,7 +287,7 @@ class InventoryService(private val db: AppDatabase, private val clock: () -> Lon
             val existing = r.barcode?.let { db.catalog().byBarcodeAny(it) } ?: r.sku?.let { db.catalog().bySku(it) }
             if (existing == null) {
                 if (r.name.isNullOrBlank() || r.price == null) { errors += "Line ${r.line}: new product needs a name and price"; continue }
-                val p = Product(UUID.randomUUID().toString(), r.sku, r.barcode, r.name.trim(), r.category, r.cost ?: 0, r.price, 0, r.unit ?: "piece", false, r.reorderMilli ?: 0, null, false, true, null, null, now, now)
+                val p = Product(UUID.randomUUID().toString(), r.sku, r.barcode, r.name.trim(), r.category, r.cost ?: 0, r.price, 0, r.unit ?: "piece", false, r.reorderMilli ?: 0, null, false, true, r.expiry, null, now, now)
                 if (apply) { db.catalog().insert(p); db.audit(staff.id, "PRODUCT_IMPORT", "product", p.id, null, now)
                     db.enqueue("PRODUCT", p.id, "UPSERT", SyncCodec.product(p, emptyList()), now)
                     if ((r.stockMilli ?: 0) > 0) applyDelta(p.id, MoveType.ADJUSTMENT, r.stockMilli!!, "CSV import opening stock", staff.id) }
@@ -282,7 +295,7 @@ class InventoryService(private val db: AppDatabase, private val clock: () -> Lon
             } else {
                 val np = existing.copy(name = r.name?.takeIf { it.isNotBlank() } ?: existing.name, category = r.category ?: existing.category, baseUnit = r.unit ?: existing.baseUnit,
                     costCentavos = r.cost ?: existing.costCentavos, priceCentavos = r.price ?: existing.priceCentavos, reorderMilli = r.reorderMilli ?: existing.reorderMilli,
-                    sku = existing.sku ?: r.sku, barcode = existing.barcode ?: r.barcode, updatedAt = now)
+                    sku = existing.sku ?: r.sku, barcode = existing.barcode ?: r.barcode, expiryDate = r.expiry ?: existing.expiryDate, updatedAt = now)
                 val delta = r.stockMilli?.let { it - existing.stockMilli } ?: 0
                 if (np.copy(updatedAt = existing.updatedAt) != existing) {
                     if (apply) { db.catalog().update(np); db.audit(staff.id, "PRODUCT_IMPORT", "product", np.id, null, now)
@@ -298,7 +311,7 @@ class InventoryService(private val db: AppDatabase, private val clock: () -> Lon
 
 enum class BulkPriceMode { PERCENT_BP, ADD_CENTAVOS, SET_CENTAVOS }
 data class ImportRow(val line: Int, val sku: String?, val barcode: String?, val name: String?, val category: String?, val unit: String?,
-                     val cost: Long?, val price: Long?, val stockMilli: Long?, val reorderMilli: Long?)
+                     val cost: Long?, val price: Long?, val stockMilli: Long?, val reorderMilli: Long?, val expiry: String? = null)
 data class ImportReport(val created: Int, val updated: Int, val stockChanged: Int, val errors: List<String>)
 
 class ShiftService(private val db: AppDatabase, private val clock: () -> Long = { System.currentTimeMillis() }) {
@@ -320,10 +333,11 @@ class ShiftService(private val db: AppDatabase, private val clock: () -> Long = 
     }
 
     suspend fun preview(shiftId: String, counted: Long?): ZRead {
-        val s = db.sales()
+        val s = db.sales(); val sv = s.serviceSums(shiftId)
         return ZReadCalculator.compute(ZInputs(
             s.shift(shiftId)!!.openingFloatCentavos, s.gross(shiftId), s.discounts(shiftId), s.voidedTotal(shiftId),
-            s.paymentTotals(shiftId), s.creditIssued(shiftId), s.movementTotals(shiftId), s.perCashier(shiftId), counted))
+            s.paymentTotals(shiftId), s.creditIssued(shiftId), s.movementTotals(shiftId), s.perCashier(shiftId), counted,
+            sv.cashIn, sv.cashOut, sv.fees, sv.count))
     }
 
     /** Freezes the Z-Read. The closing row is never updated; later corrections must be new audited entries. */
@@ -340,5 +354,38 @@ class ShiftService(private val db: AppDatabase, private val clock: () -> Long = 
         db.sales().closeShift(shiftId, now)
         db.audit(staff.id, "SHIFT_CLOSE", "shift", shiftId, "variance ${z.variance}", now)
         text
+    }
+}
+
+/** GCash/Maya cash-in/out, e-load and bills. Drawer effect: cash-in +amount(+fee), cash-out -amount(+fee if paid in cash), load/bills +amount(+fee). */
+class CashServiceService(private val db: AppDatabase, private val clock: () -> Long = { System.currentTimeMillis() }) {
+    companion object {
+        fun drawerEffect(type: ServiceType, amount: Long, fee: Long, feeInCash: Boolean): Pair<Long, Long> {   // (cashIn, cashOut)
+            val f = if (feeInCash) fee else 0
+            return when (type) { ServiceType.CASH_IN, ServiceType.LOAD, ServiceType.BILLS -> (amount + f) to 0L; ServiceType.CASH_OUT -> f to amount }
+        }
+    }
+
+    suspend fun record(id: String, shiftId: String, staffId: String, type: ServiceType, provider: String, amount: Long, fee: Long, feeInCash: Boolean, customer: String?, ref: String?): ServiceTxn = db.withTransaction {
+        db.sales().service(id)?.let { return@withTransaction it }                                // idempotent
+        val staff = db.requirePerm(staffId, Perm.SELL)
+        val shift = db.sales().shift(shiftId)
+        if (shift == null || shift.closedAt != null) throw PosException.Invalid("Open a shift first")
+        if (amount <= 0 || fee < 0) throw PosException.Invalid("Enter the amount (and a fee of 0 or more)")
+        if (provider.isBlank()) throw PosException.Invalid("Choose the provider")
+        val (cin, cout) = drawerEffect(type, amount, fee, feeInCash); val now = clock()
+        val t = ServiceTxn(id, shiftId, staff.id, type, provider.trim(), amount, fee, feeInCash, cin, cout, customer?.takeIf { it.isNotBlank() }, ref?.takeIf { it.isNotBlank() }, now)
+        db.sales().insertService(t)
+        db.audit(staff.id, "SERVICE_$type", "service_txn", id, "${Money.format(amount)} fee ${Money.format(fee)}", now)
+        db.enqueue("SERVICE", id, "CREATE", SyncCodec.service(t), now)
+        t
+    }
+
+    suspend fun void(id: String, reason: String, staffId: String) = db.withTransaction {
+        val staff = db.requirePerm(staffId, Perm.VOID)
+        if (reason.isBlank()) throw PosException.Invalid("A reason is required")
+        if (db.sales().markServiceVoided(id, reason) == 0) throw PosException.Invalid("Already voided or not found")
+        db.audit(staff.id, "SERVICE_VOID", "service_txn", id, reason, clock())
+        db.enqueue("SERVICE", id, "VOID", org.json.JSONObject().put("id", id).put("reason", reason), clock())
     }
 }

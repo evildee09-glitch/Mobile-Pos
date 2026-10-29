@@ -2,6 +2,7 @@ package ph.sarisari.mpos.domain
 
 import androidx.room.withTransaction
 import ph.sarisari.mpos.data.*
+import ph.sarisari.mpos.util.Expiry
 import ph.sarisari.mpos.util.Manila
 import ph.sarisari.mpos.util.Money
 import ph.sarisari.mpos.util.Qty
@@ -15,6 +16,12 @@ class PurchasingService(private val db: AppDatabase, private val inventory: Inve
     suspend fun suggestFromLowStock(): List<NewPoLine> = db.catalog().lowStockNow().mapNotNull {
         val need = it.reorderMilli * 2 - it.stockMilli
         if (need > 0) NewPoLine(it.id, null, need, it.costCentavos) else null
+    }
+
+    /** Based on how fast each product actually sells (last 30 days). */
+    suspend fun suggestSmart(now: Long = System.currentTimeMillis()): List<ReorderSuggestion> {
+        val sold = db.sales().soldQty(now - 30 * 86_400_000L).associate { it.productId to it.qtyMilli }
+        return SmartReorder.suggest(db.catalog().activeNow(), sold)
     }
 
     suspend fun createDraft(supplierId: String?, lines: List<NewPoLine>, notes: String?, staffId: String): PurchaseOrder = db.withTransaction {
@@ -106,14 +113,14 @@ object Csv {
 }
 
 object ProductCsv {
-    const val HEADER = "sku,barcode,name,category,unit,cost,price,stock,reorder"
+    const val HEADER = "sku,barcode,name,category,unit,cost,price,stock,reorder,expiry"   // expiry as yyyy-MM-dd
     /** Header names are case-insensitive; order is free. Returns rows plus per-line parse errors. */
     fun parse(text: String): Pair<List<ImportRow>, List<String>> {
         val table = Csv.parse(text); if (table.isEmpty()) return emptyList<ImportRow>() to listOf("File is empty")
         val h = table[0].map { it.trim().lowercase() }
         fun idx(vararg n: String) = n.firstNotNullOfOrNull { k -> h.indexOf(k).takeIf { it >= 0 } }
         val iSku = idx("sku"); val iBar = idx("barcode"); val iName = idx("name"); val iCat = idx("category"); val iUnit = idx("unit"); val iCost = idx("cost")
-        val iPrice = idx("price"); val iStock = idx("stock"); val iRe = idx("reorder")
+        val iPrice = idx("price"); val iStock = idx("stock"); val iRe = idx("reorder"); val iExp = idx("expiry", "expiry_date", "exp")
         if (iName == null && iBar == null && iSku == null) return emptyList<ImportRow>() to listOf("Header row needs at least name, barcode or sku")
         val errors = mutableListOf<String>(); val rows = mutableListOf<ImportRow>()
         table.drop(1).forEachIndexed { n, r ->
@@ -122,13 +129,14 @@ object ProductCsv {
             fun money(i: Int?, label: String): Long? { val v = g(i) ?: return null; return Money.parse(v) ?: run { errors += "Line $line: bad $label '$v'"; null } }
             fun qty(i: Int?, label: String): Long? { val v = g(i) ?: return null; return Qty.parse(v) ?: run { errors += "Line $line: bad $label '$v'"; null } }
             val before = errors.size
-            val row = ImportRow(line, g(iSku), g(iBar), g(iName), g(iCat), g(iUnit), money(iCost, "cost"), money(iPrice, "price"), qty(iStock, "stock"), qty(iRe, "reorder"))
+            val exp = g(iExp)?.let { v -> if (Expiry.parse(v) != null) v.trim() else { errors += "Line $line: bad expiry '$v' (use yyyy-MM-dd)"; null } }
+            val row = ImportRow(line, g(iSku), g(iBar), g(iName), g(iCat), g(iUnit), money(iCost, "cost"), money(iPrice, "price"), qty(iStock, "stock"), qty(iRe, "reorder"), exp)
             if (errors.size == before) rows += row
         }
         return rows to errors
     }
     fun export(products: List<Product>): String = HEADER + "\n" + products.joinToString("\n") {
         listOf(it.sku ?: "", it.barcode ?: "", it.name, it.category ?: "", it.baseUnit, Money.format(it.costCentavos).removePrefix("₱").replace(",", ""),
-            Money.format(it.priceCentavos).removePrefix("₱").replace(",", ""), Qty.format(it.stockMilli), Qty.format(it.reorderMilli)).joinToString(",") { c -> Csv.cell(c) }
+            Money.format(it.priceCentavos).removePrefix("₱").replace(",", ""), Qty.format(it.stockMilli), Qty.format(it.reorderMilli), it.expiryDate ?: "").joinToString(",") { c -> Csv.cell(c) }
     }
 }

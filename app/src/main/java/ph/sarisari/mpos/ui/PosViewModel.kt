@@ -1,14 +1,23 @@
 package ph.sarisari.mpos.ui
 
 import android.app.Application
+import android.net.Uri
+import org.json.JSONObject
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import ph.sarisari.mpos.PosApp
 import ph.sarisari.mpos.data.*
+import ph.sarisari.mpos.backup.DriveBackup
+import ph.sarisari.mpos.backup.DriveFile
 import ph.sarisari.mpos.domain.*
+import ph.sarisari.mpos.util.Expiry
 import ph.sarisari.mpos.util.Manila
 import ph.sarisari.mpos.util.Money
 import ph.sarisari.mpos.util.Qty
@@ -39,8 +48,13 @@ class PosViewModel(app: Application) : AndroidViewModel(app) {
     private fun go(block: suspend () -> Unit) = viewModelScope.launch { try { block() } catch (e: Exception) { fail(e) } }
     fun can(p: Perm) = user.value?.let { Rbac.can(it.role, p) } ?: false
 
-    fun setupOwner(name: String, pin: String) = go { user.value = c.auth.createStaff(name, Role.OWNER, pin, null) }
-    fun login(s: Staff, pin: String) = go { user.value = c.auth.authenticate(s.id, pin); clearCart() }
+    val showTips = MutableStateFlow(false)
+    private suspend fun checkTips() { if (db.admin().setting("tips_seen") != "1") showTips.value = true }
+    fun finishTips() { showTips.value = false; go { db.admin().putSetting(AppSetting("tips_seen", "1")) } }
+    fun replayTips() { showTips.value = true }
+
+    fun setupOwner(name: String, pin: String) = go { user.value = c.auth.createStaff(name, Role.OWNER, pin, null); checkTips() }
+    fun login(s: Staff, pin: String) = go { user.value = c.auth.authenticate(s.id, pin); clearCart(); license.value = c.license.state(); checkTips() }
     fun logout() { user.value = null; clearCart() }          // unsynced sales stay in the DB/outbox; logout never deletes data
     fun addStaff(name: String, role: Role, pin: String) = go { c.auth.createStaff(name, role, pin, user.value!!.id); toast.value = "Staff added" }
 
@@ -70,7 +84,7 @@ class PosViewModel(app: Application) : AndroidViewModel(app) {
         val q = query.value.trim()
         if (q.isEmpty()) return@go
         val p = db.catalog().byBarcode(q) ?: results.value.singleOrNull()
-        if (p != null) { addProduct(p); query.value = "" } else toast.value = "No match for \"$q\""
+        if (p != null) { tryAdd(p); query.value = "" } else toast.value = "No match for \"$q\""
     }
 
     // ---- cart ----
@@ -105,12 +119,12 @@ class PosViewModel(app: Application) : AndroidViewModel(app) {
         val u = user.value ?: return; val s = shift.value
         if (s == null) { toast.value = "Open a shift first (Shift tab)"; return }
         val req = CheckoutRequest(txId, u.id, s.id, customerId.value, cart.value.map { CartLineInput(it.product.id, it.unitName, it.qtyMilli) },
-            discount.value, payments, credit, approverId)
+            discount.value, payments, credit, approverId, allows(Feature.PROMOS))
         busy.value = true
         viewModelScope.launch {
             try {
                 val r = c.sales.checkout(req)
-                val text = ReceiptFormatter.format(buildReceipt(db, r.sale.id), (db.admin().setting("receipt_width") ?: "32").toInt())
+                val text = ReceiptFormatter.format(buildReceipt(db, r.sale.id, allows(Feature.RECEIPT_BRANDING)), (db.admin().setting("receipt_width") ?: "32").toInt())
                 lastReceipt.value = text + (if (r.changeCentavos > 0) "\nCHANGE DUE: ${Money.format(r.changeCentavos)}" else "")
                 clearCart()
             } catch (e: PosException.PermissionDenied) { approvalNeeded.value = e.message; retry = { checkout(payments, credit) }
@@ -125,8 +139,8 @@ class PosViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- products & inventory ----
     fun saveProduct(p: Product, extra: List<ProductUnit>) = go { c.inventory.saveProduct(p, extra, user.value!!.id); toast.value = "Saved ${p.name}" }
-    fun receive(productId: String, unit: String?, qty: Long, cost: Long, supplier: String?, ref: String?) =
-        go { c.inventory.receiveStock(productId, unit, qty, cost, supplier, ref, user.value!!.id); toast.value = "Stock received" }
+    fun receive(productId: String, unit: String?, qty: Long, cost: Long, supplier: String?, ref: String?, expiry: String? = null, batch: String? = null) =
+        go { c.inventory.receiveStock(productId, unit, qty, cost, supplier, ref, user.value!!.id, null, expiry, batch); toast.value = "Stock received" }
     fun adjust(productId: String, type: MoveType, delta: Long, reason: String) =
         go { c.inventory.adjust(productId, type, delta, reason, user.value!!.id); toast.value = "Stock adjusted" }
     fun saveSupplier(name: String, phone: String?) = go { db.catalog().upsertSupplier(Supplier(UUID.randomUUID().toString(), name, phone, null, true, System.currentTimeMillis())) }
@@ -167,12 +181,29 @@ class PosViewModel(app: Application) : AndroidViewModel(app) {
     val profit: StateFlow<Long> = day.flatMapLatest { db.sales().grossProfit(it.first, it.last) }.stateIn(viewModelScope, SharingStarted.Eagerly, 0)
     val recentSales = db.sales().recentSales(30).stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     fun voidSale(id: String, reason: String) = go { c.sales.voidSale(id, user.value!!.id, reason); toast.value = "Sale voided" }
-    fun reprint(id: String) = go { lastReceipt.value = ReceiptFormatter.format(buildReceipt(db, id), (db.admin().setting("receipt_width") ?: "32").toInt()) }
+    fun reprint(id: String) = go { lastReceipt.value = ReceiptFormatter.format(buildReceipt(db, id, allows(Feature.RECEIPT_BRANDING)), (db.admin().setting("receipt_width") ?: "32").toInt()) }
     fun productsCsv(): String = ProductCsv.export(allProducts.value)
 
     // ---- scanning ----
-    /** Camera / keyboard barcode -> product added to the cart (null if unknown). */
-    suspend fun scanBarcode(code: String): Product? = db.catalog().byBarcode(code.trim())?.also { addProduct(it) }
+    val expiryWarnDays: StateFlow<Int> = db.admin().settingFlow("expiry_warn_days").map { it?.toIntOrNull()?.coerceIn(1, 365) ?: 30 }.stateIn(viewModelScope, SharingStarted.Eagerly, 30)
+    /** Expired + expiring-soon products that still have stock (re-queried when the warning window changes). */
+    val expiring: StateFlow<List<Product>> = expiryWarnDays.flatMapLatest { d -> db.catalog().expiring(Expiry.today().plusDays(d.toLong()).toString()) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** Why a product cannot go in the cart (null = fine). The service layer re-checks expiry at checkout. */
+    fun blockReason(p: Product): String? = when {
+        p.stockMilli <= 0 -> "${p.name} is out of stock"
+        (Expiry.daysLeft(p.expiryDate) ?: 0) < 0 -> "${p.name} expired on ${p.expiryDate} — take it off the shelf"
+        else -> null
+    }
+    fun tryAdd(p: Product): Boolean { val why = blockReason(p); if (why != null) toast.value = why else addProduct(p); return why == null }
+    fun writeOffExpired(p: Product) = go { c.inventory.adjust(p.id, MoveType.EXPIRED, -p.stockMilli, "Expired ${p.expiryDate}", user.value!!.id); toast.value = "Written off ${p.name}" }
+
+    /** Camera / keyboard barcode -> (product, reason it was not added). Unknown barcode = (null, null). */
+    suspend fun scanBarcode(code: String): Pair<Product?, String?> {
+        val p = db.catalog().byBarcode(code.trim()) ?: return null to null
+        val why = blockReason(p); if (why == null) addProduct(p); return p to why
+    }
     val categories: StateFlow<List<String>> = allProducts.map { l -> l.mapNotNull { it.category?.takeIf { c -> c.isNotBlank() } }.distinct().sorted() }
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
@@ -210,6 +241,118 @@ class PosViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun prepareReminder(customerId: String, channel: Channel) = c.reminders.prepare(customerId, channel)
     fun logReminder(customerId: String, channel: Channel) = go { c.reminders.log(customerId, channel, user.value!!.id) }
 
+    // ---- payment QR codes (display only; payments are never auto-verified) ----
+    private fun qrKey(m: PaymentMethod) = "qr_${m.name}"
+    val qrVersion = MutableStateFlow(0)
+    suspend fun qrBitmap(m: PaymentMethod): ImageBitmap? = withContext(Dispatchers.Default) {
+        val b64 = db.admin().setting(qrKey(m))?.takeIf { it.isNotBlank() } ?: return@withContext null
+        val bytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+    }
+    suspend fun walletInfo(m: PaymentMethod) = WalletInfo(db.admin().setting("wallet_${m.name}_number") ?: "", db.admin().setting("wallet_${m.name}_name") ?: "")
+    fun saveWalletInfo(m: PaymentMethod, number: String, name: String) = go {
+        if (!can(Perm.MANAGE_STAFF)) throw PosException.PermissionDenied(Perm.MANAGE_STAFF)
+        val digits = number.filter { it.isDigit() }
+        if (digits.isNotEmpty() && Reminders.normalizePhone(digits) == null) throw PosException.Invalid("Enter an 11-digit mobile number like 0917 123 4567")
+        db.admin().putSetting(AppSetting("wallet_${m.name}_number", digits)); db.admin().putSetting(AppSetting("wallet_${m.name}_name", name.trim()))
+        qrVersion.value++; toast.value = "${m.name} details saved"
+    }
+    fun saveQr(m: PaymentMethod, uri: Uri) = go {
+        if (!can(Perm.MANAGE_STAFF)) throw PosException.PermissionDenied(Perm.MANAGE_STAFF)
+        val (b64, found) = QrImport.process(c.ctx, uri)
+        db.admin().putSetting(AppSetting(qrKey(m), b64)); qrVersion.value++
+        toast.value = if (found) "${m.name} QR saved" else "Saved, but no QR code was detected in that picture — please check it"
+    }
+    fun removeQr(m: PaymentMethod) = go {
+        if (!can(Perm.MANAGE_STAFF)) throw PosException.PermissionDenied(Perm.MANAGE_STAFF)
+        db.admin().putSetting(AppSetting(qrKey(m), "")); qrVersion.value++
+    }
+
+    // ---- Google Drive backup (owner's own Drive, appDataFolder) ----
+    val driveConnected: StateFlow<Boolean> = db.admin().settingFlow("drive_connected").map { it == "1" }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val driveAuto: StateFlow<Boolean> = db.admin().settingFlow("drive_auto").map { it != "0" }.stateIn(viewModelScope, SharingStarted.Eagerly, true)
+    val lastDriveBackup: StateFlow<String?> = db.admin().settingFlow("last_drive_backup_at").stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    val driveError: StateFlow<String?> = db.admin().settingFlow("last_drive_error").stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    private fun requireOwner() { if (!can(Perm.RESTORE)) throw PosException.PermissionDenied(Perm.RESTORE) }
+    fun setDriveConnected(ok: Boolean, passphrase: String) = go {
+        requireOwner()
+        db.admin().putSetting(AppSetting("drive_connected", if (ok) "1" else "0"))
+        if (ok) { db.admin().putSetting(AppSetting("backup_pass", passphrase)); toast.value = "Google Drive connected" }
+    }
+    fun setDriveAuto(on: Boolean) = go { requireOwner(); db.admin().putSetting(AppSetting("drive_auto", if (on) "1" else "0")) }
+    fun driveBackupNow() = go { requireOwner(); toast.value = "Backing up…"; toast.value = DriveBackup.backupNow(c) ?: "Backed up to your Google Drive ✓" }
+    suspend fun driveList(): List<DriveFile> { requireOwner(); return DriveBackup.list(c) }
+    fun driveRestore(f: DriveFile, pass: String, done: () -> Unit) = go { requireOwner(); DriveBackup.restore(c, f.id, pass, user.value!!.id); done() }
+
+    // ---- GCash / load services ----
+    val serviceDay: StateFlow<ServiceSums> = day.flatMapLatest { db.sales().serviceDay(it.first, it.last) }.stateIn(viewModelScope, SharingStarted.Eagerly, ServiceSums(0, 0, 0, 0))
+    val recentServices = db.sales().recentServices(40).stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    fun recordService(type: ServiceType, provider: String, amount: Long, fee: Long, feeInCash: Boolean, customer: String?, ref: String?, done: () -> Unit) = go {
+        val s = shift.value ?: throw PosException.Invalid("Open a shift first (Shift tab)")
+        c.services.record(UUID.randomUUID().toString(), s.id, user.value!!.id, type, provider, amount, fee, feeInCash, customer, ref); toast.value = "Recorded ✓"; done()
+    }
+    fun voidService(id: String, reason: String) = go { c.services.void(id, reason, user.value!!.id); toast.value = "Voided" }
+
+    // ---- insights ----
+    val insightDays = MutableStateFlow(30)
+    private val insightRange = insightDays.map { d -> val n = System.currentTimeMillis(); (n - d * 86_400_000L) to n }
+    val dailySales = insightRange.flatMapLatest { db.sales().dailySales(it.first, it.second) }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    val dailyProfit = insightRange.flatMapLatest { db.sales().dailyProfit(it.first, it.second) }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    val topProducts = insightRange.flatMapLatest { db.sales().topProducts(it.first, it.second, 10) }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    val slowMovers = insightDays.flatMapLatest { d -> db.catalog().slowMovers(System.currentTimeMillis() - d * 86_400_000L, 10) }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    suspend fun smartSuggestions(): List<ReorderSuggestion> = c.purchasing.suggestSmart()
+    fun createSmartPo(l: List<ReorderSuggestion>) = go {
+        if (!need(Feature.SMART_REORDER)) return@go
+        c.purchasing.createDraft(null, l.map { NewPoLine(it.product.id, null, it.suggestMilli, it.product.costCentavos) }, "Smart reorder (based on recent sales)", user.value!!.id)
+        toast.value = "Draft order created — see Purchase orders"
+    }
+    suspend fun agingRows(): List<AgingRow> = UtangAging.compute(db.sales().allLedger(), System.currentTimeMillis())
+
+    // ---- plan & license ----
+    val license = MutableStateFlow(LicenseState(Plan.UNRESTRICTED))
+    /** Live promo savings shown in the cart. The service layer recomputes the same thing at checkout, so this is only a preview. */
+    val activePromos = db.catalog().activePromosFlow().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    val promoPreview: StateFlow<PromoResult> = combine(cart, activePromos, license) { lines, promos, lic ->
+        if (!lic.allows(Feature.PROMOS)) PromoResult(0, emptyList())
+        else PromoEngine.compute(lines.filter { it.unitName == it.product.baseUnit }.map { PromoLine(it.product.id, it.qtyMilli, it.unitPrice) }, promos, Expiry.today().toString())
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, PromoResult(0, emptyList()))
+    val paywall = MutableStateFlow<Feature?>(null)
+    fun refreshLicense() = go { license.value = c.license.state() }
+    fun allows(f: Feature) = license.value.allows(f)
+    /** true = go ahead; false = the paywall dialog has been opened. Selling itself is never gated. */
+    fun need(f: Feature): Boolean { if (allows(f)) return true; paywall.value = f; return false }
+    fun activateLicense(token: String) = go { license.value = c.license.activate(token); paywall.value = null; toast.value = "License activated ✓" }
+    init { refreshLicense() }
+
+    // ---- promos & bundles ----
+    val promos = db.catalog().allPromos().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    fun savePromo(p: Promo) = go { if (!can(Perm.MANAGE_CATALOG)) throw PosException.PermissionDenied(Perm.MANAGE_CATALOG); db.catalog().upsertPromo(p); toast.value = "Promo saved" }
+
+    // ---- supplier payables ----
+    val billRows = db.catalog().billRows().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    fun addBill(supplierId: String?, ref: String?, amount: Long, due: String?, note: String?, done: () -> Unit) = go { c.payables.addBill(supplierId, null, ref, amount, due, note, user.value!!.id); toast.value = "Bill added"; done() }
+    fun billFromPo(poId: String, due: String?) = go { c.payables.billFromPo(poId, due, user.value!!.id); toast.value = "Bill created from the order" }
+    fun payBill(id: String, amount: Long, method: String) = go { c.payables.pay(id, amount, method, user.value!!.id); toast.value = "Payment recorded" }
+    fun cancelBill(id: String) = go { c.payables.cancel(id, user.value!!.id); toast.value = "Bill cancelled" }
+
+    // ---- labels ----
+    fun assignBarcodes(ids: List<String>) = go { toast.value = "${c.labels.assignBarcodes(ids, user.value!!.id)} in-store barcodes assigned" }
+    fun printLabels(items: List<Pair<LabelItem, Int>>) = go {
+        val p = c.printer() ?: throw PosException.Invalid("Choose a printer in Settings first")
+        p.printRaw(LabelEscPos.build(items)).fold({ toast.value = "Labels sent to printer" }, { toast.value = "Printer error: ${it.message}" })
+    }
+    fun labelsPdf(uri: Uri, items: List<Pair<LabelItem, Int>>) = go {
+        withContext(Dispatchers.IO) { c.ctx.contentResolver.openOutputStream(uri, "wt")!!.use { LabelSheetPdf.write(items, it) } }; toast.value = "Label sheet saved"
+    }
+
+    // ---- PDF reports ----
+    fun exportPdf(kind: String, uri: Uri, fromMs: Long, toMs: Long, customerId: String?) = go {
+        val rb = ReportBuilder(db)
+        val doc = when (kind) { "sales" -> rb.sales(fromMs, toMs); "inventory" -> rb.inventory(); "receivables" -> rb.receivables(); "payables" -> rb.payables()
+            else -> rb.customerStatement(customerId ?: throw PosException.Invalid("Choose a customer")) }
+        withContext(Dispatchers.IO) { c.ctx.contentResolver.openOutputStream(uri, "wt")!!.use { PdfWriter.write(doc, it) } }; toast.value = "PDF saved ✓"
+    }
+
     // ---- hardware ----
     fun testPrint() = go {
         val p = c.printer() ?: run { toast.value = "Choose a printer first"; return@go }
@@ -222,7 +365,11 @@ class PosViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- settings ----
     suspend fun setting(k: String) = db.admin().setting(k) ?: ""
-    fun putSetting(k: String, v: String) = go { db.requirePermPublic(user.value!!.id); db.admin().putSetting(AppSetting(k, v)) }
+    fun putSetting(k: String, v: String) = go {
+        db.requirePermPublic(user.value!!.id)
+        val old = db.admin().setting(k); db.admin().putSetting(AppSetting(k, v))
+        if (k == "store_name" && v.isNotBlank() && v != old) db.enqueue("STORE", "info", "INFO", JSONObject().put("name", v), System.currentTimeMillis())   // lets the owner web view show the shop name
+    }
 }
 
 private suspend fun AppDatabase.requirePermPublic(staffId: String) {

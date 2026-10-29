@@ -14,6 +14,12 @@ data class CashierTotal(val cashierId: String, val count: Int, val total: Long)
 data class DayTotals(val total: Long, val count: Int)
 data class CustomerBalance(val customerId: String, val balance: Long)
 data class SaleBalance(val saleId: String, val balance: Long)
+data class ServiceSums(val cashIn: Long, val cashOut: Long, val fees: Long, val count: Int)
+data class DayRow(val day: String, val total: Long, val count: Int)
+data class DayProfit(val day: String, val profit: Long)
+data class TopProduct(val productId: String, val name: String, val qtyMilli: Long, val revenue: Long, val profit: Long)
+data class SoldQty(val productId: String, val qtyMilli: Long)
+data class BillRow(@androidx.room.Embedded val bill: SupplierBill, val paid: Long)
 
 @Dao
 interface CatalogDao {
@@ -25,6 +31,33 @@ interface CatalogDao {
     @Query("SELECT * FROM products WHERE sku=:sku LIMIT 1") suspend fun bySku(sku: String): Product?
     @Query("SELECT * FROM products WHERE active=1 AND reorderMilli>0 AND stockMilli<=reorderMilli ORDER BY name") suspend fun lowStockNow(): List<Product>
     @Upsert suspend fun upsertProduct(p: Product)
+    @Query("SELECT * FROM products WHERE active=1") suspend fun activeNow(): List<Product>
+    @Query("SELECT COUNT(*) FROM products WHERE active=1 AND expiryDate IS NOT NULL AND expiryDate<=:limit AND stockMilli>0") suspend fun expiringCount(limit: String): Int
+
+    // promos
+    @Upsert suspend fun upsertPromo(p: Promo)
+    @Query("SELECT * FROM promos WHERE active=1") suspend fun activePromos(): List<Promo>
+    @Query("SELECT * FROM promos WHERE active=1") fun activePromosFlow(): Flow<List<Promo>>
+    @Query("SELECT * FROM promos ORDER BY active DESC, createdAt DESC") fun allPromos(): Flow<List<Promo>>
+
+    // supplier payables
+    @Insert suspend fun insertBill(b: SupplierBill)
+    @Update suspend fun updateBill(b: SupplierBill)
+    @Insert suspend fun insertBillPayment(p: SupplierPayment)
+    @Query("SELECT * FROM supplier_bills WHERE id=:id") suspend fun bill(id: String): SupplierBill?
+    @Query("SELECT COALESCE(SUM(amountCentavos),0) FROM supplier_payments WHERE billId=:id") suspend fun billPaid(id: String): Long
+    @Query("SELECT b.*, COALESCE((SELECT SUM(amountCentavos) FROM supplier_payments WHERE billId=b.id),0) AS paid FROM supplier_bills b WHERE b.cancelled=0 ORDER BY b.dueDate IS NULL, b.dueDate, b.createdAt")
+    fun billRows(): Flow<List<BillRow>>
+    @Query("SELECT b.*, COALESCE((SELECT SUM(amountCentavos) FROM supplier_payments WHERE billId=b.id),0) AS paid FROM supplier_bills b WHERE b.cancelled=0 ORDER BY b.dueDate IS NULL, b.dueDate, b.createdAt")
+    suspend fun billRowsNow(): List<BillRow>
+    @Query("SELECT COUNT(*) FROM supplier_bills b WHERE b.cancelled=0 AND b.dueDate IS NOT NULL AND b.dueDate<=:limit AND b.amountCentavos > COALESCE((SELECT SUM(amountCentavos) FROM supplier_payments WHERE billId=b.id),0)")
+    suspend fun dueBillCount(limit: String): Int
+    /** Stocked products nobody bought since [since] (and that existed before then): money sitting on the shelf, biggest first. */
+    @Query("SELECT * FROM products WHERE active=1 AND stockMilli>0 AND createdAt<:since AND id NOT IN (SELECT si.productId FROM sale_items si JOIN sales s ON s.id=si.saleId WHERE s.status='COMPLETED' AND s.createdAt>=:since) ORDER BY stockMilli*costCentavos DESC LIMIT :n")
+    fun slowMovers(since: Long, n: Int): Flow<List<Product>>
+    /** Products in stock whose expiry date is on/before [limitIso] (expired + expiring soon), oldest first. */
+    @Query("SELECT * FROM products WHERE active=1 AND expiryDate IS NOT NULL AND expiryDate<=:limitIso AND stockMilli>0 ORDER BY expiryDate")
+    fun expiring(limitIso: String): Flow<List<Product>>
     @Query("SELECT * FROM products ORDER BY name") fun all(): Flow<List<Product>>
     @Query("SELECT * FROM products WHERE active=1 AND favorite=1 ORDER BY name") fun favorites(): Flow<List<Product>>
     @Query(
@@ -99,6 +132,27 @@ interface SalesDao {
         "SELECT saleId, SUM(amountCentavos) AS balance FROM customer_ledger_entries " +
             "WHERE customerId=:c AND saleId IS NOT NULL GROUP BY saleId HAVING SUM(amountCentavos)>0"
     ) suspend fun openCharges(c: String): List<SaleBalance>
+
+    // GCash / load services
+    @Insert suspend fun insertService(t: ServiceTxn)
+    @Query("SELECT * FROM service_txns WHERE id=:id") suspend fun service(id: String): ServiceTxn?
+    @Query("UPDATE service_txns SET voided=1, voidReason=:reason WHERE id=:id AND voided=0") suspend fun markServiceVoided(id: String, reason: String): Int
+    @Query("SELECT * FROM service_txns ORDER BY createdAt DESC LIMIT :n") fun recentServices(n: Int): Flow<List<ServiceTxn>>
+    @Query("SELECT COALESCE(SUM(cashInCentavos),0) AS cashIn, COALESCE(SUM(cashOutCentavos),0) AS cashOut, COALESCE(SUM(feeCentavos),0) AS fees, COUNT(*) AS count FROM service_txns WHERE shiftId=:s AND voided=0")
+    suspend fun serviceSums(s: String): ServiceSums
+    @Query("SELECT COALESCE(SUM(cashInCentavos),0) AS cashIn, COALESCE(SUM(cashOutCentavos),0) AS cashOut, COALESCE(SUM(feeCentavos),0) AS fees, COUNT(*) AS count FROM service_txns WHERE voided=0 AND createdAt BETWEEN :from AND :to")
+    fun serviceDay(from: Long, to: Long): Flow<ServiceSums>
+
+    // insights (Manila day = UTC + 8h)
+    @Query("SELECT strftime('%Y-%m-%d', (createdAt/1000)+28800, 'unixepoch') AS day, COALESCE(SUM(totalCentavos),0) AS total, COUNT(*) AS count FROM sales WHERE status='COMPLETED' AND createdAt BETWEEN :from AND :to GROUP BY day ORDER BY day")
+    fun dailySales(from: Long, to: Long): Flow<List<DayRow>>
+    @Query("SELECT strftime('%Y-%m-%d', (s.createdAt/1000)+28800, 'unixepoch') AS day, COALESCE(SUM(si.subtotalCentavos - (si.costCentavosSnapshot*si.baseQtyMilli+500)/1000),0) AS profit FROM sale_items si JOIN sales s ON s.id=si.saleId WHERE s.status='COMPLETED' AND s.createdAt BETWEEN :from AND :to GROUP BY day ORDER BY day")
+    fun dailyProfit(from: Long, to: Long): Flow<List<DayProfit>>
+    @Query("SELECT si.productId AS productId, si.productNameSnapshot AS name, COALESCE(SUM(si.baseQtyMilli),0) AS qtyMilli, COALESCE(SUM(si.subtotalCentavos),0) AS revenue, COALESCE(SUM(si.subtotalCentavos - (si.costCentavosSnapshot*si.baseQtyMilli+500)/1000),0) AS profit FROM sale_items si JOIN sales s ON s.id=si.saleId WHERE s.status='COMPLETED' AND s.createdAt BETWEEN :from AND :to GROUP BY si.productId ORDER BY revenue DESC LIMIT :n")
+    fun topProducts(from: Long, to: Long, n: Int): Flow<List<TopProduct>>
+    @Query("SELECT si.productId AS productId, COALESCE(SUM(si.baseQtyMilli),0) AS qtyMilli FROM sale_items si JOIN sales s ON s.id=si.saleId WHERE s.status='COMPLETED' AND s.createdAt>=:since GROUP BY si.productId")
+    suspend fun soldQty(since: Long): List<SoldQty>
+    @Query("SELECT * FROM customer_ledger_entries ORDER BY createdAt, rowid") suspend fun allLedger(): List<LedgerEntry>
 
     // shifts / cash
     @Query("SELECT * FROM shifts WHERE closedAt IS NULL LIMIT 1") fun openShift(): Flow<Shift?>

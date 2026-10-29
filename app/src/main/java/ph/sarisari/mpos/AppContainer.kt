@@ -18,10 +18,14 @@ class AppContainer(val ctx: Context) {
     val purchasing = PurchasingService(db, inventory)
     val reminders = ReminderService(db)
     val shifts = ShiftService(db)
+    val payables = PayablesService(db)
+    val labels = LabelService(db)
+    val services = CashServiceService(db)
+    val license = LicenseManager(db, BuildConfig.LICENSE_PUBLIC_KEY)
     val backup = BackupManager(ctx, db)
 
     init {   // stable per-install device id used in receipt numbers and sync
-        runBlocking { if (db.admin().setting("device_id") == null) db.admin().putSetting(AppSetting("device_id", UUID.randomUUID().toString())) }
+        runBlocking { license.ensureTrialStarted(); if (db.admin().setting("device_id") == null) db.admin().putSetting(AppSetting("device_id", UUID.randomUUID().toString())) }
     }
 
     /** printer_type: NONE | BLUETOOTH (printer_mac) | NETWORK (printer_host[:port]). */
@@ -35,5 +39,5 @@ class AppContainer(val ctx: Context) {
 
 class PosApp : Application() {
     lateinit var container: AppContainer
-    override fun onCreate() { super.onCreate(); container = AppContainer(this); SyncScheduler.schedule(this) }
+    override fun onCreate() { super.onCreate(); container = AppContainer(this); SyncScheduler.schedule(this); ph.sarisari.mpos.backup.DriveBackupScheduler.schedule(this); ph.sarisari.mpos.notify.Alerts.schedule(this) }
 }

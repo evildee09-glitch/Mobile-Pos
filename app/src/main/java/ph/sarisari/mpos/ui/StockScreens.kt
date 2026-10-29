@@ -30,6 +30,7 @@ import kotlinx.coroutines.launch
 import ph.sarisari.mpos.data.*
 import ph.sarisari.mpos.domain.BulkPriceMode
 import ph.sarisari.mpos.domain.NewPoLine
+import ph.sarisari.mpos.util.Expiry
 import ph.sarisari.mpos.util.Manila
 import ph.sarisari.mpos.util.Money
 import ph.sarisari.mpos.util.Qty
@@ -47,7 +48,8 @@ fun StockScreen(vm: PosViewModel) {
     var edit by remember { mutableStateOf<Product?>(null) }; var adding by remember { mutableStateOf<String?>(null) }; var newOpen by remember { mutableStateOf(false) }
     var receive by remember { mutableStateOf<Product?>(null) }; var adjust by remember { mutableStateOf<Product?>(null) }
     var scan by remember { mutableStateOf(false) }; var bulk by remember { mutableStateOf<String?>(null) }
-    val list = products.filter { filter.isBlank() || it.name.contains(filter, true) || it.barcode == filter || it.sku.equals(filter, true) }
+    val expiring by vm.expiring.collectAsState(); val warn by vm.expiryWarnDays.collectAsState(); var onlyExp by remember { mutableStateOf(false) }
+    val list = (if (onlyExp) expiring else products).filter { filter.isBlank() || it.name.contains(filter, true) || it.barcode == filter || it.sku.equals(filter, true) }
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.padding(horizontal = 12.dp)) {
             Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -56,8 +58,12 @@ fun StockScreen(vm: PosViewModel) {
                 if (vm.can(Perm.MANAGE_CATALOG)) Button({ newOpen = true }, Modifier.height(56.dp), shape = RoundedCornerShape(16.dp)) { Text("+ New") }
             }
             Row(Modifier.padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (vm.can(Perm.MANAGE_CATALOG) || vm.can(Perm.STOCK_ADJUST)) FilterChip(selecting, { selecting = !selecting; selected = emptySet() }, label = { Text("☑ Select for bulk edit") })
+                if (vm.can(Perm.MANAGE_CATALOG) || vm.can(Perm.STOCK_ADJUST)) FilterChip(selecting, { if (selecting || vm.need(ph.sarisari.mpos.domain.Feature.BULK_EDIT_IMPORT)) { selecting = !selecting; selected = emptySet() } }, label = { Text("☑ Select for bulk edit" + if (vm.allows(ph.sarisari.mpos.domain.Feature.BULK_EDIT_IMPORT)) "" else " 🔒") })
+                FilterChip(onlyExp, { onlyExp = !onlyExp }, label = { Text("⏳ Expiring" + if (expiring.isNotEmpty()) " (${expiring.size})" else "") })
                 Text("${products.size} products", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (expiring.isNotEmpty() && !onlyExp) Card(Modifier.fillMaxWidth().padding(bottom = 6.dp).clickable { onlyExp = true }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                Text("⏳ ${expiring.count { (Expiry.daysLeft(it.expiryDate) ?: 0) < 0 }} expired · ${expiring.size} expired or expiring within $warn days — tap to review", Modifier.padding(12.dp), fontSize = 13.sp)
             }
             if (low.isNotEmpty()) Card(Modifier.fillMaxWidth().padding(bottom = 6.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)) {
                 Text("⚠ Low stock: " + low.joinToString { it.name }, Modifier.padding(12.dp), fontSize = 13.sp)
@@ -65,7 +71,7 @@ fun StockScreen(vm: PosViewModel) {
             if (list.isEmpty()) EmptyState("📦", "No products yet", "Tap + New, scan a barcode, or import a CSV from More.")
             LazyVerticalGrid(GridCells.Adaptive(360.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = if (selecting) 90.dp else 12.dp)) {
                 items(list, key = { it.id }) { p ->
-                    val out = p.stockMilli <= 0; val lowStock = !out && p.reorderMilli > 0 && p.stockMilli <= p.reorderMilli
+                    val dl = Expiry.daysLeft(p.expiryDate); val out = p.stockMilli <= 0; val lowStock = !out && p.reorderMilli > 0 && p.stockMilli <= p.reorderMilli
                     ElevatedCard(Modifier.fillMaxWidth().clickable { if (selecting) selected = if (p.id in selected) selected - p.id else selected + p.id else if (vm.can(Perm.MANAGE_CATALOG)) edit = p }, shape = RoundedCornerShape(18.dp)) {
                         Column(Modifier.padding(12.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -74,6 +80,7 @@ fun StockScreen(vm: PosViewModel) {
                                 Column(Modifier.weight(1f)) {
                                     Text(p.name + if (!p.active) "  (inactive)" else "", fontWeight = FontWeight.SemiBold)
                                     Text(listOfNotNull(p.category, p.barcode).joinToString(" · ").ifBlank { "No barcode" }, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    dl?.let { d -> Text(Expiry.label(d), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = if (d < 0) MaterialTheme.colorScheme.error else if (d <= warn) androidx.compose.ui.graphics.Color(0xFFB26A00) else MaterialTheme.colorScheme.onSurfaceVariant) }
                                     units[p.id]?.let { u -> Text(u.joinToString { "1 ${it.unitName} = ${Qty.format(it.factorMilli)} ${p.baseUnit}" }, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                                 }
                                 Column(horizontalAlignment = Alignment.End) {
@@ -83,6 +90,7 @@ fun StockScreen(vm: PosViewModel) {
                             }
                             if (!selecting) Row(Modifier.padding(top = 4.dp)) {
                                 if (vm.can(Perm.STOCK_ADJUST)) { TextButton({ receive = p }) { Text("Receive") }; TextButton({ adjust = p }) { Text("Adjust") } }
+                                if (vm.can(Perm.STOCK_ADJUST) && dl != null && dl < 0 && p.stockMilli > 0) TextButton({ vm.writeOffExpired(p) }) { Text("Write off", color = MaterialTheme.colorScheme.error) }
                                 if (vm.can(Perm.MANAGE_CATALOG)) TextButton({ edit = p }) { Text("Edit") }
                             }
                         }
@@ -124,6 +132,7 @@ fun ProductDialog(vm: PosViewModel, p: Product?, units: List<ProductUnit>, prese
     var reorder by remember { mutableStateOf(p?.let { Qty.format(it.reorderMilli) } ?: "0") }
     var frac by remember { mutableStateOf(p?.allowsFraction ?: false) }; var fav by remember { mutableStateOf(p?.favorite ?: false) }; var active by remember { mutableStateOf(p?.active ?: true) }
     val u0 = units.firstOrNull(); var caseName by remember { mutableStateOf(u0?.unitName ?: "") }; var caseFactor by remember { mutableStateOf(u0?.let { Qty.format(it.factorMilli) } ?: "") }
+    var expiry by remember { mutableStateOf(p?.expiryDate ?: "") }; var batch by remember { mutableStateOf(p?.batchNo ?: "") }
     var scan by remember { mutableStateOf(false) }
     AlertDialog(onDismissRequest = onDismiss, title = { Text(if (p == null) "New product" else "Edit product") }, text = {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -132,6 +141,8 @@ fun ProductDialog(vm: PosViewModel, p: Product?, units: List<ProductUnit>, prese
             Field("Category (Drinks, Snacks…)", cat, { cat = it }); Field("SKU (optional)", sku, { sku = it }); Field("Base unit (piece, kg, sachet…)", unit, { unit = it })
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Field("Cost ₱", cost, { cost = it }, Modifier.weight(1f), number = true); Field("Price ₱", price, { price = it }, Modifier.weight(1f), number = true) }
             Field("Reorder level", reorder, { reorder = it }, number = true)
+            DateField("Expiry date (yyyy-MM-dd, optional)", expiry) { expiry = it }
+            if (expiry.isNotBlank()) Field("Batch / lot no. (optional)", batch, { batch = it })
             Row(verticalAlignment = Alignment.CenterVertically) { Switch(frac, { frac = it }); Text("  Sold by weight/volume (decimals)") }
             Row(verticalAlignment = Alignment.CenterVertically) { Switch(fav, { fav = it }); Text("  Show in Favorites") }
             if (p != null) Row(verticalAlignment = Alignment.CenterVertically) { Switch(active, { active = it }); Text("  Active") }
@@ -143,10 +154,10 @@ fun ProductDialog(vm: PosViewModel, p: Product?, units: List<ProductUnit>, prese
         Button({
             val now = System.currentTimeMillis()
             val prod = Product(p?.id ?: UUID.randomUUID().toString(), sku.ifBlank { null }, barcode.ifBlank { null }, name.trim(), cat.ifBlank { null }, Money.parse(cost) ?: 0, Money.parse(price) ?: 0,
-                p?.stockMilli ?: 0, unit.trim().ifBlank { "piece" }, frac, Qty.parse(reorder) ?: 0, p?.supplierId, fav, active, p?.expiryDate, p?.batchNo, p?.createdAt ?: now, now)
+                p?.stockMilli ?: 0, unit.trim().ifBlank { "piece" }, frac, Qty.parse(reorder) ?: 0, p?.supplierId, fav, active, expiry.trim().ifBlank { null }, batch.trim().ifBlank { null }.takeIf { expiry.isNotBlank() }, p?.createdAt ?: now, now)
             val extra = Qty.parse(caseFactor)?.takeIf { caseName.isNotBlank() && it > 0 }?.let { listOf(ProductUnit(prod.id, caseName.trim(), it)) } ?: emptyList()
             vm.saveProduct(prod, extra); onDismiss()
-        }, enabled = name.isNotBlank() && Money.parse(price) != null) { Text("Save") }
+        }, enabled = name.isNotBlank() && Money.parse(price) != null && (expiry.isBlank() || Expiry.parse(expiry) != null)) { Text("Save") }
     }, dismissButton = { TextButton(onDismiss) { Text("Cancel") } })
     if (scan) ScannerDialog("Scan barcode", { code -> barcode = code; "✓ $code" }, { scan = false }, closeOnFirst = true)
 }
@@ -155,16 +166,18 @@ fun ProductDialog(vm: PosViewModel, p: Product?, units: List<ProductUnit>, prese
 fun ReceiveDialog(vm: PosViewModel, p: Product, units: List<ProductUnit>, onDismiss: () -> Unit) {
     val opts = listOf(p.baseUnit) + units.map { it.unitName }
     var unit by remember { mutableStateOf(p.baseUnit) }; var qty by remember { mutableStateOf("") }; var cost by remember { mutableStateOf("") }; var ref by remember { mutableStateOf("") }
-    val suppliers by vm.suppliers.collectAsState(); var sup by remember { mutableStateOf<Supplier?>(null) }; var newSup by remember { mutableStateOf("") }
+    val suppliers by vm.suppliers.collectAsState(); var sup by remember { mutableStateOf<Supplier?>(null) }; var newSup by remember { mutableStateOf("") }; var exp by remember { mutableStateOf("") }; var batch by remember { mutableStateOf("") }
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Receive: ${p.name}") }, text = {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) { opts.forEach { o -> FilterChip(unit == o, { unit = o }, label = { Text(o) }) } }
             Field("Quantity received ($unit)", qty, { qty = it }, number = true); Field("Cost per $unit ₱ (optional)", cost, { cost = it }, number = true)
             OutlinedButton({ sup = (listOf<Supplier?>(null) + suppliers).next(sup) }) { Text("Supplier: ${sup?.name ?: "none"} (tap to change)") }
             Row(verticalAlignment = Alignment.CenterVertically) { Field("New supplier", newSup, { newSup = it }, Modifier.weight(1f)); TextButton({ vm.saveSupplier(newSup, null); newSup = "" }, enabled = newSup.isNotBlank()) { Text("Add") } }
+            DateField("Expiry date of this delivery (optional)", exp) { exp = it }
+            if (exp.isNotBlank()) Field("Batch / lot no. (optional)", batch, { batch = it })
             Field("Delivery receipt / reference", ref, { ref = it })
         }
-    }, confirmButton = { Button({ vm.receive(p.id, unit, Qty.parse(qty) ?: 0, Money.parse(cost) ?: 0, sup?.id, ref.ifBlank { null }); onDismiss() }, enabled = (Qty.parse(qty) ?: 0) > 0) { Text("Receive") } },
+    }, confirmButton = { Button({ vm.receive(p.id, unit, Qty.parse(qty) ?: 0, Money.parse(cost) ?: 0, sup?.id, ref.ifBlank { null }, exp.trim().ifBlank { null }, batch.trim().ifBlank { null }); onDismiss() }, enabled = (Qty.parse(qty) ?: 0) > 0 && (exp.isBlank() || Expiry.parse(exp) != null)) { Text("Receive") } },
         dismissButton = { TextButton(onDismiss) { Text("Cancel") } })
 }
 

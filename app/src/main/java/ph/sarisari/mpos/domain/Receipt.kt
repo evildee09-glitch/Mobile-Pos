@@ -13,7 +13,8 @@ import kotlinx.coroutines.withContext
 
 data class ReceiptData(
     val storeName: String, val storePhone: String?, val sale: Sale, val items: List<SaleItem>,
-    val payments: List<Payment>, val cashierName: String, val customerName: String?, val customerBalance: Long?
+    val payments: List<Payment>, val cashierName: String, val customerName: String?, val customerBalance: Long?,
+    val header: String? = null, val footer: String? = null      // Premium: receipt branding
 )
 
 object ReceiptFormatter {
@@ -26,6 +27,7 @@ object ReceiptFormatter {
         }
         val line = "-".repeat(width)
         center(d.storeName); d.storePhone?.let { center(it) }
+        d.header?.lines()?.filter { it.isNotBlank() }?.forEach { center(it.trim()) }
         center("SALES RECEIPT")
         appendLine(line)
         lr("No: ${d.sale.receiptNumber}", ""); lr(Manila.fmt(d.sale.createdAt), "Cashier: ${d.cashierName}".take(width / 2))
@@ -49,26 +51,43 @@ object ReceiptFormatter {
             lr("On Utang (${d.customerName ?: ""})", Money.format(d.sale.creditCentavos))
             d.customerBalance?.let { lr("Utang balance", Money.format(it)) }
         }
-        appendLine(line); center("Thank you! Salamat po!")
+        appendLine(line)
+        val foot = d.footer?.lines()?.filter { it.isNotBlank() }
+        if (foot.isNullOrEmpty()) center("Thank you! Salamat po!") else foot.forEach { center(it.trim()) }
         center("Not an official BIR receipt")
     }
 }
 
-suspend fun buildReceipt(db: AppDatabase, saleId: String): ReceiptData {
+suspend fun buildReceipt(db: AppDatabase, saleId: String, brand: Boolean = false): ReceiptData {
     val sale = db.sales().sale(saleId) ?: throw PosException.Invalid("Sale not found")
     val cust = sale.customerId?.let { db.admin().customer(it) }
     return ReceiptData(
         db.admin().setting("store_name") ?: "My Sari-Sari Store", db.admin().setting("store_phone"),
         sale, db.sales().items(saleId), db.sales().paymentsForSale(saleId),
-        db.admin().staff(sale.cashierId)?.name ?: "-", cust?.name, cust?.let { db.sales().balance(it.id) }
+        db.admin().staff(sale.cashierId)?.name ?: "-", cust?.name, cust?.let { db.sales().balance(it.id) },
+        if (brand) db.admin().setting("receipt_header")?.takeIf { it.isNotBlank() } else null, if (brand) db.admin().setting("receipt_footer")?.takeIf { it.isNotBlank() } else null
     )
 }
 
 /** Hardware adapter: add USB / network / vendor-SDK printers by implementing this interface. */
-interface ReceiptPrinter { suspend fun print(text: String, openDrawer: Boolean = false): Result<Unit> }
+interface ReceiptPrinter {
+    suspend fun print(text: String, openDrawer: Boolean = false): Result<Unit>
+    /** Raw ESC/POS bytes (used for barcode labels). */
+    suspend fun printRaw(bytes: ByteArray): Result<Unit> = Result.failure(UnsupportedOperationException("This printer does not support raw printing"))
+}
 
 /** Generic ESC/POS over Bluetooth SPP (classic). Printer must be paired in Android settings first. UNTESTED on real hardware. */
 class EscPosBluetoothPrinter(private val ctx: Context, private val mac: String) : ReceiptPrinter {
+    @SuppressLint("MissingPermission")
+    override suspend fun printRaw(bytes: ByteArray): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val adapter = (ctx.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter ?: error("Bluetooth not available")
+            val socket = adapter.getRemoteDevice(mac).createRfcommSocketToServiceRecord(UUID.fromString("00001101-0000-1000-8000-00805F9B34FB"))
+            adapter.cancelDiscovery()
+            socket.use { s -> s.connect(); s.outputStream.apply { write(bytes); flush() } }
+        }
+    }
+
     @SuppressLint("MissingPermission")
     override suspend fun print(text: String, openDrawer: Boolean): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
@@ -93,6 +112,10 @@ class EscPosBluetoothPrinter(private val ctx: Context, private val mac: String) 
 
 /** ESC/POS over LAN (port 9100) — most Ethernet/Wi-Fi receipt printers. UNTESTED on real hardware. */
 class NetworkEscPosPrinter(private val host: String, private val port: Int = 9100) : ReceiptPrinter {
+    override suspend fun printRaw(bytes: ByteArray): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching { Socket().use { s -> s.connect(InetSocketAddress(host, port), 4000); s.getOutputStream().apply { write(bytes); flush() } } }
+    }
+
     override suspend fun print(text: String, openDrawer: Boolean): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             Socket().use { s ->

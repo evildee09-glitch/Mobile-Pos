@@ -7,7 +7,8 @@ import ph.sarisari.mpos.util.Money
 data class ZInputs(
     val openingFloat: Long, val gross: Long, val discounts: Long, val refunds: Long,
     val payments: List<PaymentTotal>, val creditIssued: Long, val moves: List<MovementTotal>,
-    val perCashier: List<CashierTotal>, val counted: Long? = null
+    val perCashier: List<CashierTotal>, val counted: Long? = null,
+    val serviceCashIn: Long = 0, val serviceCashOut: Long = 0, val serviceFees: Long = 0, val serviceCount: Int = 0
 )
 
 data class ZRead(
@@ -15,7 +16,8 @@ data class ZRead(
     val cashSales: Long, val digitalSales: Map<PaymentMethod, Long>,
     val creditIssued: Long, val debtCashCollected: Long, val debtDigitalCollected: Map<PaymentMethod, Long>,
     val cashAdded: Long, val cashWithdrawn: Long, val expenses: Long, val cashRefunds: Long,
-    val expectedCash: Long, val counted: Long?, val variance: Long?, val perCashier: List<CashierTotal>
+    val expectedCash: Long, val counted: Long?, val variance: Long?, val perCashier: List<CashierTotal>,
+    val serviceCashIn: Long = 0, val serviceCashOut: Long = 0, val serviceFees: Long = 0, val serviceCount: Int = 0
 )
 
 object ZReadCalculator {
@@ -35,11 +37,12 @@ object ZReadCalculator {
         val debtCash = total(PaymentKind.DEBT_PAYMENT, true)
         val cashRefunds = total(PaymentKind.REFUND, true)
         val adds = move(CashMoveType.ADD); val wd = move(CashMoveType.WITHDRAW); val exp = move(CashMoveType.EXPENSE)
-        val expected = i.openingFloat + cashSales + debtCash + adds - cashRefunds - exp - wd
+        val expected = i.openingFloat + cashSales + debtCash + adds - cashRefunds - exp - wd + i.serviceCashIn - i.serviceCashOut
         return ZRead(
             i.openingFloat, i.gross, i.discounts, i.refunds, i.gross - i.discounts - i.refunds,
             cashSales, byMethod(PaymentKind.SALE), i.creditIssued, debtCash, byMethod(PaymentKind.DEBT_PAYMENT),
-            adds, wd, exp, cashRefunds, expected, i.counted, i.counted?.minus(expected), i.perCashier
+            adds, wd, exp, cashRefunds, expected, i.counted, i.counted?.minus(expected), i.perCashier,
+            i.serviceCashIn, i.serviceCashOut, i.serviceFees, i.serviceCount
         )
     }
 
@@ -58,6 +61,7 @@ object ZReadCalculator {
         z.debtDigitalCollected.forEach { (m, v) -> l("Utang collected - ${m.name}", v) }
         l("Cash added", z.cashAdded); l("Cash withdrawn", -z.cashWithdrawn)
         l("Expenses/payouts", -z.expenses); l("Cash refunds", -z.cashRefunds)
+        if (z.serviceCount > 0) { l("GCash/load: cash taken in", z.serviceCashIn); l("GCash/load: cash paid out", -z.serviceCashOut); appendLine("  (service fees earned: ${Money.format(z.serviceFees)})") }
         appendLine("-".repeat(44))
         l("EXPECTED DRAWER CASH", z.expectedCash)
         z.counted?.let { l("Counted cash", it); l(if ((z.variance ?: 0) < 0) "SHORT" else "OVER", z.variance ?: 0) }

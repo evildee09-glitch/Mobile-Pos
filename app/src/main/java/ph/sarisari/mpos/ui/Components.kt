@@ -127,3 +127,20 @@ fun ProductPickerDialog(products: List<ph.sarisari.mpos.data.Product>, onPick: (
 }
 
 fun Modifier.clickableNoRipple(onClick: () -> Unit): Modifier = this.then(Modifier.clickable(onClick = onClick))
+
+/** Text field + calendar picker for ISO dates (yyyy-MM-dd). Empty string = no date. */
+@Composable
+fun DateField(label: String, value: String, onChange: (String) -> Unit) {
+    var pick by remember { mutableStateOf(false) }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Field(label, value, onChange, Modifier.weight(1f))
+        TextButton({ pick = true }) { Text("📅") }
+        if (value.isNotBlank()) TextButton({ onChange("") }) { Text("✕") }
+    }
+    if (pick) {
+        val st = rememberDatePickerState(initialSelectedDateMillis = ph.sarisari.mpos.util.Expiry.parse(value)?.atStartOfDay(java.time.ZoneOffset.UTC)?.toInstant()?.toEpochMilli())
+        DatePickerDialog({ pick = false },
+            confirmButton = { TextButton({ st.selectedDateMillis?.let { onChange(java.time.Instant.ofEpochMilli(it).atZone(java.time.ZoneOffset.UTC).toLocalDate().toString()) }; pick = false }) { Text("OK") } },
+            dismissButton = { TextButton({ pick = false }) { Text("Cancel") } }) { DatePicker(st) }
+    }
+}

@@ -42,6 +42,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import ph.sarisari.mpos.data.*
 import ph.sarisari.mpos.domain.PaymentInput
 import ph.sarisari.mpos.domain.Rbac
+import ph.sarisari.mpos.util.Expiry
 import ph.sarisari.mpos.util.Manila
 import ph.sarisari.mpos.util.Money
 import ph.sarisari.mpos.util.Qty
@@ -151,6 +152,9 @@ fun MainScreen(vm: PosViewModel, user: Staff) {
             }
         }
     }
+    val tips by vm.showTips.collectAsState(); val paywall by vm.paywall.collectAsState()
+    paywall?.let { PaywallDialog(vm, it) { vm.paywall.value = null } }
+    if (tips) TipsDialog(can, { vm.finishTips() })
     receipt?.let { r -> TextDialog("Receipt", r, { vm.lastReceipt.value = null }) { TextButton({ vm.printReceipt(r, drawer = true) }) { Text("Print") } } }
     approval?.let { PinDialog("$it\nOwner PIN:", { vm.approvalNeeded.value = null }) { pin -> vm.approve(pin) } }
 }
@@ -189,7 +193,7 @@ fun CheckoutScreen(vm: PosViewModel) {
     val wide = LocalConfiguration.current.screenWidthDp >= 600
     val cart by vm.cart.collectAsState()
     var showCart by remember { mutableStateOf(false) }; var showScan by remember { mutableStateOf(false) }
-    val total = (cart.sumOf { it.total } - vm.discount.collectAsState().value).coerceAtLeast(0)
+    val total = (cart.sumOf { it.total } - vm.discount.collectAsState().value - vm.promoPreview.collectAsState().value.totalDiscount).coerceAtLeast(0)
     if (wide) Row(Modifier.fillMaxSize()) {
         CatalogPane(vm, { showScan = true }, Modifier.weight(1.3f).fillMaxHeight())
         Surface(Modifier.weight(1f).fillMaxHeight(), color = MaterialTheme.colorScheme.surface.copy(alpha = 0.86f)) { CartPane(vm, Modifier.fillMaxSize()) }
@@ -206,7 +210,8 @@ fun CheckoutScreen(vm: PosViewModel) {
     }
     if (showCart && !wide) ModalBottomSheet(onDismissRequest = { showCart = false }, containerColor = MaterialTheme.colorScheme.surface) { CartPane(vm, Modifier.fillMaxWidth().heightIn(max = 640.dp)) }
     if (showScan) ScannerDialog("Scan items", { code ->
-        vm.scanBarcode(code)?.let { "✓ ${it.name} added · ${Money.format(it.priceCentavos)}" } ?: "Unknown barcode $code"
+        val (p, why) = vm.scanBarcode(code)
+        when { why != null -> "⛔ $why"; p != null -> "✓ ${p.name} added · ${Money.format(p.priceCentavos)}"; else -> "Unknown barcode $code" }
     }, { showScan = false }) {
         val c by vm.cart.collectAsState()
         Text("Cart: ${c.size} items · ${Money.format(c.sumOf { it.total })}", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -215,7 +220,7 @@ fun CheckoutScreen(vm: PosViewModel) {
 
 @Composable
 fun CatalogPane(vm: PosViewModel, onScan: () -> Unit, modifier: Modifier) {
-    val products by vm.allProducts.collectAsState(); val cats by vm.categories.collectAsState()
+    val products by vm.allProducts.collectAsState(); val cats by vm.categories.collectAsState(); val warn by vm.expiryWarnDays.collectAsState()
     var q by remember { mutableStateOf("") }; var cat by remember { mutableStateOf("★") }
     val shown = remember(products, q, cat) {
         val base = products.filter { it.active }
@@ -237,12 +242,14 @@ fun CatalogPane(vm: PosViewModel, onScan: () -> Unit, modifier: Modifier) {
         if (shown.isEmpty()) EmptyState("🔎", "No products here", "Add products in the Stock tab, or import a CSV from More.")
         LazyVerticalGrid(GridCells.Adaptive(150.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(bottom = 12.dp)) {
             items(shown, key = { it.id }) { p ->
-                val out = p.stockMilli <= 0
-                Card(onClick = { if (out) vm.toast.value = "${p.name} is out of stock" else vm.addProduct(p) }, Modifier.alpha(if (out) 0.5f else 1f), shape = RoundedCornerShape(18.dp)) {
+                val out = p.stockMilli <= 0; val dl = Expiry.daysLeft(p.expiryDate); val expired = dl != null && dl < 0
+                Card(onClick = { vm.tryAdd(p) }, Modifier.alpha(if (out || expired) 0.5f else 1f), shape = RoundedCornerShape(18.dp)) {
                     Column(Modifier.padding(12.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             ProductAvatar(p.name, 38.dp); Spacer(Modifier.weight(1f))
                             if (out) Pill("Out", MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer)
+                            else if (expired) Pill("Expired", MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer)
+                            else if (dl != null && dl <= warn) Pill("Exp ${dl}d", MaterialTheme.colorScheme.tertiaryContainer)
                             else if (p.reorderMilli > 0 && p.stockMilli <= p.reorderMilli) Pill("Low", MaterialTheme.colorScheme.tertiaryContainer)
                         }
                         Text(p.name, Modifier.padding(top = 8.dp), fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis, minLines = 2)
@@ -259,7 +266,8 @@ fun CatalogPane(vm: PosViewModel, onScan: () -> Unit, modifier: Modifier) {
 fun CartPane(vm: PosViewModel, modifier: Modifier) {
     val cart by vm.cart.collectAsState(); val discount by vm.discount.collectAsState()
     val customers by vm.customers.collectAsState(); val balances by vm.balances.collectAsState(); val custId by vm.customerId.collectAsState()
-    val subtotal = cart.sumOf { it.total }; val total = (subtotal - discount).coerceAtLeast(0)
+    val promo by vm.promoPreview.collectAsState()
+    val subtotal = cart.sumOf { it.total }; val total = (subtotal - discount - promo.totalDiscount).coerceAtLeast(0)
     var showPay by remember { mutableStateOf(false) }; var custMenu by remember { mutableStateOf(false) }; var discDialog by remember { mutableStateOf(false) }
     var editQty by remember { mutableStateOf<Int?>(null) }
     val compact = LocalConfiguration.current.screenHeightDp < 480
@@ -312,6 +320,7 @@ fun CartPane(vm: PosViewModel, modifier: Modifier) {
             }
         } else {
             picker()
+            if (promo.totalDiscount > 0) Text("🏷 ${promo.applied.joinToString()}  −${Money.format(promo.totalDiscount)}", Modifier.padding(top = 6.dp), color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
             Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("Subtotal ${Money.format(subtotal)}", Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 TextButton({ discDialog = true }, enabled = cart.isNotEmpty()) { Text(if (discount > 0) "Discount −${Money.format(discount)}" else "+ Discount") }
@@ -366,9 +375,10 @@ fun PaymentSheet(vm: PosViewModel, total: Long, customerId: String?, onDismiss: 
                     listOf(20L, 50L, 100L, 200L, 500L, 1000L).forEach { a -> AssistChip({ cash = pesos(a * 100) }, label = { Text("₱$a") }) }
                 }
             }
-            if (useG) Field("GCash ₱", gcash, { gcash = it }, number = true)
-            if (useM) Field("Maya ₱", maya, { maya = it }, number = true)
-            if (useS) Field("ShopeePay ₱", shopee, { shopee = it }, number = true)
+            val left = (total - g - m - s - u - cashV).coerceAtLeast(0)
+            if (useG) { Field("GCash ₱", gcash, { gcash = it }, number = true); QrBlock(vm, PaymentMethod.GCASH, if (g > 0) g else left) }
+            if (useM) { Field("Maya ₱", maya, { maya = it }, number = true); QrBlock(vm, PaymentMethod.MAYA, if (m > 0) m else left) }
+            if (useS) { Field("ShopeePay ₱", shopee, { shopee = it }, number = true); QrBlock(vm, PaymentMethod.SHOPEEPAY, if (s > 0) s else left) }
             if (useG || useM || useS) { Field("E-wallet reference # (optional)", ref, { ref = it }); Text("E-wallet amounts are recorded as typed; they are not verified with GCash/Maya.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             if (useU) { Field("Utang ₱", utang, { utang = it }, number = true); if (customerId == null) Text("Pick a customer in the cart first.", color = MaterialTheme.colorScheme.error) }
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer), shape = RoundedCornerShape(16.dp)) {

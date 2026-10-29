@@ -29,15 +29,17 @@ interface RemoteApi {
     suspend fun pull(deviceId: String, cursor: String): PullResult
 }
 
-class HttpRemoteApi(private val baseUrl: String, private val token: String) : RemoteApi {
+class HttpRemoteApi(private val baseUrl: String, private val token: String, private val license: String? = null) : RemoteApi {
     private fun open(path: String, post: Boolean): HttpURLConnection =
         (URL(baseUrl.trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
             requestMethod = if (post) "POST" else "GET"; connectTimeout = 15_000; readTimeout = 30_000
             setRequestProperty("Authorization", "Bearer $token"); setRequestProperty("Content-Type", "application/json")
+            if (!license.isNullOrBlank()) setRequestProperty("X-License", license)
             if (post) doOutput = true
         }
 
     private fun read(c: HttpURLConnection): JSONObject {
+        if (c.responseCode == 402) error("License required — activate Premium in Settings → Plan & license")
         if (c.responseCode !in 200..299) error("HTTP ${c.responseCode}")
         return JSONObject(c.inputStream.bufferedReader().readText())
     }
@@ -99,7 +101,7 @@ class SyncApplier(private val db: AppDatabase, private val clock: () -> Long = {
             "PRODUCT" to "UPSERT" -> {
                 val local = c.get(j.getString("id"))
                 if (local == null || j.getLong("updatedAt") >= local.updatedAt) {
-                    c.upsertProduct(SyncCodec.toProduct(j, local?.stockMilli ?: 0).copy(supplierId = local?.supplierId, expiryDate = local?.expiryDate, batchNo = local?.batchNo))
+                    c.upsertProduct(SyncCodec.toProduct(j, local?.stockMilli ?: 0).copy(supplierId = local?.supplierId))
                     SyncCodec.toUnits(j).forEach { c.upsertUnit(it) }
                 }
             }
@@ -138,6 +140,9 @@ class SyncApplier(private val db: AppDatabase, private val clock: () -> Long = {
                 ensureCustomer(p.customerId)
                 s.insertPayment(p); s.insertLedger(SyncCodec.toLedger(j.getJSONObject("ledger")))
             }
+            "STORE" to "INFO" -> {}
+            "SERVICE" to "CREATE" -> { val t = SyncCodec.toService(j); if (s.service(t.id) == null) s.insertService(t) }
+            "SERVICE" to "VOID" -> s.markServiceVoided(j.getString("id"), j.optString("reason", "voided on another device"))
             "STOCK" to "DELTA" -> {
                 val m = SyncCodec.toMove(j.getJSONObject("move"))
                 ensureProduct(m.productId, "(product from another device)", 0)
@@ -154,7 +159,9 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         val db = (applicationContext as PosApp).container.db
         val admin = db.admin()
         val url = admin.setting("sync_url")?.takeIf { it.isNotBlank() } ?: return Result.success()   // sync is optional
-        val api = HttpRemoteApi(url, admin.setting("sync_token") ?: "")
+        val lic = (applicationContext as PosApp).container.license
+        if (!lic.state().allows(ph.sarisari.mpos.domain.Feature.MULTI_DEVICE_SYNC)) { admin.putSetting(AppSetting("last_sync_error", "Multi-device sync is a Premium feature")); return Result.success() }
+        val api = HttpRemoteApi(url, admin.setting("sync_token") ?: "", lic.token())
         val device = admin.setting("device_id") ?: "unknown"
         return try {
             // 1) upload local facts

@@ -13,12 +13,12 @@ object SyncCodec {
     fun product(p: Product, units: List<ProductUnit>) = JSONObject()
         .put("id", p.id).put("sku", p.sku).put("barcode", p.barcode).put("name", p.name).put("category", p.category)
         .put("cost", p.costCentavos).put("price", p.priceCentavos).put("baseUnit", p.baseUnit).put("fraction", p.allowsFraction)
-        .put("reorder", p.reorderMilli).put("favorite", p.favorite).put("active", p.active).put("createdAt", p.createdAt).put("updatedAt", p.updatedAt)
+        .put("reorder", p.reorderMilli).put("favorite", p.favorite).put("active", p.active).put("expiry", p.expiryDate).put("batch", p.batchNo).put("createdAt", p.createdAt).put("updatedAt", p.updatedAt)
         .put("units", JSONArray(units.map { JSONObject().put("name", it.unitName).put("factor", it.factorMilli).put("price", it.priceCentavos) }))
 
     fun toProduct(j: JSONObject, stock: Long) = Product(j.getString("id"), j.str("sku"), j.str("barcode"), j.getString("name"), j.str("category"),
         j.getLong("cost"), j.getLong("price"), stock, j.getString("baseUnit"), j.getBoolean("fraction"), j.getLong("reorder"), null,
-        j.getBoolean("favorite"), j.getBoolean("active"), null, null, j.getLong("createdAt"), j.getLong("updatedAt"))
+        j.getBoolean("favorite"), j.getBoolean("active"), j.str("expiry"), j.str("batch"), j.getLong("createdAt"), j.getLong("updatedAt"))
 
     fun toUnits(j: JSONObject): List<ProductUnit> = arr(j.optJSONArray("units")) { ProductUnit(j.getString("id"), it.getString("name"), it.getLong("factor"), it.lng("price")) }
 
@@ -57,6 +57,12 @@ object SyncCodec {
         .put("factor", r.conversionFactorMilli).put("base", r.baseQtyMilli).put("cost", r.unitCostCentavos).put("ref", r.reference).put("staffId", r.staffId).put("createdAt", r.createdAt).put("poId", r.poId)
     fun toReceipt(j: JSONObject) = StockReceipt(j.getString("id"), j.str("supplierId"), j.getString("productId"), j.getString("unit"), j.getLong("qty"), j.getLong("factor"),
         j.getLong("base"), j.getLong("cost"), j.str("ref"), j.getString("staffId"), j.getLong("createdAt"), j.str("poId"))
+
+    fun service(t: ServiceTxn) = JSONObject().put("id", t.id).put("shiftId", t.shiftId).put("staffId", t.staffId).put("type", t.type.name).put("provider", t.provider)
+        .put("amount", t.amountCentavos).put("fee", t.feeCentavos).put("feeInCash", t.feeInCash).put("cashIn", t.cashInCentavos).put("cashOut", t.cashOutCentavos)
+        .put("customer", t.customerName).put("ref", t.reference).put("createdAt", t.createdAt).put("voided", t.voided).put("voidReason", t.voidReason)
+    fun toService(j: JSONObject) = ServiceTxn(j.getString("id"), j.getString("shiftId"), j.getString("staffId"), ServiceType.valueOf(j.getString("type")), j.getString("provider"),
+        j.getLong("amount"), j.getLong("fee"), j.getBoolean("feeInCash"), j.getLong("cashIn"), j.getLong("cashOut"), j.str("customer"), j.str("ref"), j.getLong("createdAt"), j.getBoolean("voided"), j.str("voidReason"))
 
     fun saleBundle(s: Sale, items: List<SaleItem>, pays: List<Payment>, ledgerRows: List<LedgerEntry>, moves: List<InventoryMovement>) = JSONObject()
         .put("sale", sale(s)).put("items", JSONArray(items.map { item(it) })).put("payments", JSONArray(pays.map { payment(it) }))

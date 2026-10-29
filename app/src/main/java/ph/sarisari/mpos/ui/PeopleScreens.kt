@@ -30,9 +30,11 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import ph.sarisari.mpos.data.*
 import ph.sarisari.mpos.domain.Channel
+import ph.sarisari.mpos.domain.Feature
 import ph.sarisari.mpos.domain.Rbac
 import ph.sarisari.mpos.domain.Reminders
 import ph.sarisari.mpos.domain.ZReadCalculator
+import ph.sarisari.mpos.util.Expiry
 import ph.sarisari.mpos.util.Manila
 import ph.sarisari.mpos.util.Money
 import ph.sarisari.mpos.util.Qty
@@ -44,13 +46,13 @@ private fun pesos(c: Long) = Money.format(c).removePrefix("₱").replace(",", ""
 fun CustomersScreen(vm: PosViewModel) {
     val customers by vm.customers.collectAsState(); val balances by vm.balances.collectAsState()
     var detail by remember { mutableStateOf<Customer?>(null) }; var edit by remember { mutableStateOf<Customer?>(null) }; var adding by remember { mutableStateOf(false) }
-    var q by remember { mutableStateOf("") }
+    var q by remember { mutableStateOf("") }; var aging by remember { mutableStateOf(false) }
     Column(Modifier.padding(12.dp)) {
         Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer), shape = RoundedCornerShape(20.dp)) {
             Column(Modifier.padding(16.dp)) { Text("Total Utang (pa-utang)", fontSize = 12.sp); Text(Money.format(balances.values.sum()), fontSize = 28.sp, fontWeight = FontWeight.ExtraBold) }
         }
         Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Field("Search customer", q, { q = it }, Modifier.weight(1f)); Button({ adding = true }, Modifier.height(56.dp), shape = RoundedCornerShape(16.dp)) { Text("+ New") }
+            Field("Search customer", q, { q = it }, Modifier.weight(1f)); FilledTonalButton({ if (vm.need(Feature.UTANG_AGING)) aging = true }, Modifier.height(56.dp), shape = RoundedCornerShape(16.dp)) { Text("⏳ Aging" + if (vm.allows(Feature.UTANG_AGING)) "" else " 🔒") }; Button({ adding = true }, Modifier.height(56.dp), shape = RoundedCornerShape(16.dp)) { Text("+ New") }
         }
         val list = customers.filter { q.isBlank() || it.name.contains(q, true) }.sortedByDescending { balances[it.id] ?: 0 }
         if (list.isEmpty()) EmptyState("📒", "No customers yet", "Add regulars to track their utang.")
@@ -67,6 +69,7 @@ fun CustomersScreen(vm: PosViewModel) {
             }
         }
     }
+    if (aging) AgingDialog(vm) { aging = false }
     if (adding) CustomerEditDialog(vm, null) { adding = false }
     edit?.let { CustomerEditDialog(vm, it) { edit = null } }
     detail?.let { c -> CustomerDetailDialog(vm, c, balances[c.id] ?: 0, { edit = c; detail = null }) { detail = null } }
@@ -172,6 +175,7 @@ fun ReportsScreen(vm: PosViewModel) {
     LaunchedEffect(Unit) { vm.refreshDay() }
     val today by vm.today.collectAsState(); val profit by vm.profit.collectAsState(); val low by vm.lowStock.collectAsState()
     val sales by vm.recentSales.collectAsState(); val pending by vm.pendingSync.collectAsState(); val balances by vm.balances.collectAsState()
+    val expiring by vm.expiring.collectAsState()
     var voiding by remember { mutableStateOf<Sale?>(null) }; var why by remember { mutableStateOf("") }
     LazyColumn(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
@@ -180,6 +184,10 @@ fun ReportsScreen(vm: PosViewModel) {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) { StatCard("Est. gross profit", Money.format(profit), Modifier.weight(1f), MaterialTheme.colorScheme.tertiaryContainer); StatCard("Utang owed", Money.format(balances.values.sum()), Modifier.weight(1f), MaterialTheme.colorScheme.tertiaryContainer) }
             Text("Profit is an estimate before discounts, not cash collected. Pending sync: $pending", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
             if (low.isNotEmpty()) { SectionTitle("Low stock"); Text(low.joinToString { "${it.name} (${Qty.format(it.stockMilli)})" }, fontSize = 13.sp) }
+            if (expiring.isNotEmpty()) {
+                SectionTitle("⏳ Expired / expiring soon")
+                expiring.take(15).forEach { Text("${it.name} — ${Expiry.label(Expiry.daysLeft(it.expiryDate) ?: 0)} · ${Qty.format(it.stockMilli)} ${it.baseUnit}", fontSize = 13.sp, color = if ((Expiry.daysLeft(it.expiryDate) ?: 0) < 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface) }
+            }
             SectionTitle("Recent sales")
         }
         items(sales, key = { it.id }) { s ->
@@ -206,26 +214,36 @@ fun MoreScreen(vm: PosViewModel, user: Staff) {
     val can = { p: Perm -> Rbac.can(user.role, p) }
     if (page == null) {
         Column(Modifier.padding(12.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            fun item(key: String, icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, sub: String) = key to Triple(icon, title, sub)
+            val lic by vm.license.collectAsState()
+            class Entry(val key: String, val icon: androidx.compose.ui.graphics.vector.ImageVector, val title: String, val sub: String, val feature: Feature?)
             listOfNotNull(
-                if (can(Perm.CLOSE_SHIFT)) item("reports", Icons.Filled.Info, "Reports", "Sales, profit, low stock, void a sale") else null,
-                if (can(Perm.STOCK_ADJUST)) item("purchasing", Icons.Filled.Send, "Purchase orders", "Order from suppliers, receive deliveries") else null,
-                if (can(Perm.MANAGE_CATALOG)) item("import", Icons.Filled.Share, "Import / export CSV", "Bulk-load or export your product list") else null,
-                if (can(Perm.MANAGE_STAFF)) item("settings", Icons.Filled.Settings, "Settings", "Store, printer, cloud sync, backup, staff") else null
-            ).forEach { (key, t) ->
-                ElevatedCard(Modifier.fillMaxWidth().clickable { page = key }, shape = RoundedCornerShape(18.dp)) {
+                if (can(Perm.CLOSE_SHIFT)) Entry("reports", Icons.Filled.Info, "Reports", "Today's sales, low stock, expiring, void a sale", null) else null,
+                if (can(Perm.CLOSE_SHIFT)) Entry("insights", Icons.Filled.Star, "Sales & profit insights", "Best sellers, slow movers, profit by day, smart reorder", Feature.INSIGHTS) else null,
+                if (can(Perm.SELL)) Entry("services", Icons.Filled.Phone, "GCash cash-in/out & load", "Record cash-in, cash-out, e-load and bills with your fee", Feature.CASH_SERVICES) else null,
+                if (can(Perm.STOCK_ADJUST) || can(Perm.EXPENSE)) Entry("payables", Icons.Filled.Notifications, "Supplier payables", "Bills you owe, due dates, pay in parts", Feature.SUPPLIER_PAYABLES) else null,
+                if (can(Perm.MANAGE_CATALOG)) Entry("promos", Icons.Filled.Favorite, "Promos & bundles", "3-for-₱50, buy 3 get 1, % off, volume prices", Feature.PROMOS) else null,
+                if (can(Perm.MANAGE_CATALOG)) Entry("labels", Icons.Filled.Create, "Barcode labels", "Print price + barcode labels, make in-store barcodes", Feature.LABELS) else null,
+                if (can(Perm.CLOSE_SHIFT)) Entry("pdf", Icons.Filled.Done, "PDF reports", "Sales, inventory, Utang, payables, statements", Feature.PDF_REPORTS) else null,
+                if (can(Perm.STOCK_ADJUST)) Entry("purchasing", Icons.Filled.Send, "Purchase orders", "Order from suppliers, receive deliveries", Feature.PURCHASE_ORDERS) else null,
+                if (can(Perm.MANAGE_CATALOG)) Entry("import", Icons.Filled.Share, "Import / export CSV", "Bulk-load or export your product list", Feature.BULK_EDIT_IMPORT) else null,
+                if (can(Perm.MANAGE_STAFF)) Entry("settings", Icons.Filled.Settings, "Settings", "Store, printer, plan, cloud sync, backup, staff", null) else null
+            ).forEach { e ->
+                val locked = e.feature != null && !lic.allows(e.feature)
+                ElevatedCard(Modifier.fillMaxWidth().clickable { if (e.feature == null || vm.need(e.feature)) page = e.key }, shape = RoundedCornerShape(18.dp)) {
                     Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(t.first, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(14.dp))
-                        Column { Text(t.second, fontSize = 17.sp, fontWeight = FontWeight.SemiBold); Text(t.third, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                        Icon(e.icon, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(14.dp))
+                        Column(Modifier.weight(1f)) { Text(e.title, fontSize = 17.sp, fontWeight = FontWeight.SemiBold); Text(e.sub, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                        if (locked) Pill("🔒 Premium", MaterialTheme.colorScheme.tertiaryContainer)
                     }
                 }
             }
+            OutlinedButton({ vm.replayTips() }, Modifier.fillMaxWidth().height(52.dp)) { Text("💡 Show tips") }
             OutlinedButton({ vm.logout() }, Modifier.fillMaxWidth().height(52.dp)) { Text("Log out ${user.name}") }
         }
     } else Column {
         TextButton({ page = null }, Modifier.padding(horizontal = 8.dp)) { Text("← Back") }
         Box(Modifier.weight(1f)) {
-            when (page) { "reports" -> ReportsScreen(vm); "purchasing" -> PurchasingScreen(vm); "import" -> ImportExportScreen(vm); "settings" -> SettingsScreen(vm) }
+            when (page) { "reports" -> ReportsScreen(vm); "insights" -> InsightsScreen(vm); "services" -> ServicesScreen(vm); "purchasing" -> PurchasingScreen(vm); "payables" -> PayablesScreen(vm); "promos" -> PromosScreen(vm); "labels" -> LabelsScreen(vm); "pdf" -> PdfReportsScreen(vm); "import" -> ImportExportScreen(vm); "settings" -> SettingsScreen(vm) }
         }
     }
 }

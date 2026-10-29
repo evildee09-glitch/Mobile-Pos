@@ -43,6 +43,12 @@ object BackupCrypto {
 class BackupManager(private val ctx: Context, private val db: AppDatabase, private val schemaVersion: Int = 1) {
     private val dbFile get() = ctx.getDatabasePath(AppDatabase.DB_NAME)
 
+    /** Encrypted snapshot of the whole database, for unattended backups (no staff check: only the app's own worker calls this). */
+    suspend fun encryptedSnapshot(pass: CharArray): ByteArray = withContext(Dispatchers.IO) {
+        db.openHelper.writableDatabase.query("PRAGMA wal_checkpoint(TRUNCATE)").use { it.moveToFirst() }
+        BackupCrypto.encrypt(dbFile.readBytes(), pass)
+    }
+
     /**
      * Folds the WAL into the main file and copies it. Caveat: a sale committed *during* the copy can tear the snapshot;
      * run backups when the till is idle. (SQLite VACUUM INTO needs Android 11+, so it is not used with minSdk 29.)
@@ -57,9 +63,12 @@ class BackupManager(private val ctx: Context, private val db: AppDatabase, priva
     }
 
     /** Validates the backup completely, keeps a safety copy of the current DB, then swaps files. The app must restart afterwards. */
-    suspend fun restoreFrom(uri: Uri, pass: CharArray, staffId: String) = withContext(Dispatchers.IO) {
+    suspend fun restoreFrom(uri: Uri, pass: CharArray, staffId: String) =
+        restoreFromBytes(withContext(Dispatchers.IO) { ctx.contentResolver.openInputStream(uri)!!.use { it.readBytes() } }, pass, staffId)
+
+    suspend fun restoreFromBytes(encrypted: ByteArray, pass: CharArray, staffId: String) = withContext(Dispatchers.IO) {
         db.requirePerm(staffId, Perm.RESTORE)
-        val plain = BackupCrypto.decrypt(ctx.contentResolver.openInputStream(uri)!!.use { it.readBytes() }, pass)
+        val plain = BackupCrypto.decrypt(encrypted, pass)
         val tmp = File(ctx.cacheDir, "restore.db").apply { writeBytes(plain) }
         try {
             if (String(plain.copyOfRange(0, 15)) != "SQLite format 3") throw PosException.Invalid("Backup is not a SQLite database")

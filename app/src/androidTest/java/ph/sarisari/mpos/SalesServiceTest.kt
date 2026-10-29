@@ -222,4 +222,70 @@ class SalesServiceTest {
             assertEquals(1, dbB.sales().recentSales(10).first().size)
         } finally { dbB.close() }
     }
+
+    @Test fun expiredProduct_cannotBeSold_butLastDayCan() = runBlocking {
+        val today = ph.sarisari.mpos.util.Expiry.today()
+        val old = product("Old milk", 5_000, 5_000).copy(expiryDate = today.minusDays(1).toString()).also { add(it) }
+        val ok = product("Fresh milk", 5_000, 5_000).copy(expiryDate = today.toString()).also { add(it) }
+        val pay = listOf(PaymentInput(PaymentMethod.CASH, 5_000))
+        assertThrows(PosException.InvalidCart::class.java) { runBlocking { sales.checkout(req(listOf(CartLineInput(old.id, null, 1000)), pay)) } }
+        sales.checkout(req(listOf(CartLineInput(ok.id, null, 1000)), pay))
+        assertEquals(5_000L, db.catalog().get(old.id)!!.stockMilli)                 // nothing deducted for the rejected sale
+    }
+
+    @Test fun receiving_keepsNearestExpiry_andRejectsBadDate() = runBlocking {
+        val p = product("Yogurt", 2_000, 0).also { add(it) }
+        inv.receiveStock(p.id, null, 5_000, 0, null, null, owner.id, null, "2026-12-01", "A")
+        assertEquals("2026-12-01", db.catalog().get(p.id)!!.expiryDate)
+        inv.receiveStock(p.id, null, 5_000, 0, null, null, owner.id, null, "2027-02-01", "B")          // later delivery: keep the nearer date
+        assertEquals("2026-12-01", db.catalog().get(p.id)!!.expiryDate)
+        inv.receiveStock(p.id, null, 5_000, 0, null, null, owner.id, null, "2026-11-10", "C")          // earlier date wins
+        assertEquals("2026-11-10", db.catalog().get(p.id)!!.expiryDate)
+        assertThrows(PosException.Invalid::class.java) { runBlocking { inv.receiveStock(p.id, null, 1_000, 0, null, null, owner.id, null, "31/12/2026", null) } }
+    }
+
+    @Test fun gcashServices_moveTheDrawer_andVoidReverses() = runBlocking {
+        val svc = CashServiceService(db)
+        svc.record(UUID.randomUUID().toString(), shift.id, cashier.id, ServiceType.CASH_IN, "GCash", 100_000, 2_000, true, "Rosa", null)    // +1,020
+        val out = svc.record(UUID.randomUUID().toString(), shift.id, cashier.id, ServiceType.CASH_OUT, "GCash", 50_000, 1_000, true, null, "ref1")  // -500 +10
+        assertEquals(100_000L + 102_000 - 50_000 + 1_000, shifts.preview(shift.id, null).expectedCash)
+        assertEquals(3_000L, shifts.preview(shift.id, null).serviceFees)
+        assertThrows(PosException.PermissionDenied::class.java) { runBlocking { svc.void(out.id, "typo", cashier.id) } }
+        svc.void(out.id, "typo", owner.id)
+        assertEquals(100_000L + 102_000, shifts.preview(shift.id, null).expectedCash)
+        val id = UUID.randomUUID().toString()                                                                                           // idempotent record
+        svc.record(id, shift.id, cashier.id, ServiceType.LOAD, "Globe", 10_000, 500, true, null, null); svc.record(id, shift.id, cashier.id, ServiceType.LOAD, "Globe", 10_000, 500, true, null, null)
+        assertEquals(100_000L + 102_000 + 10_500, shifts.preview(shift.id, null).expectedCash)
+    }
+
+    @Test fun promo_appliesAtCheckout_onlyWhenEnabled_andManualDiscountStillNeedsApproval() = runBlocking {
+        val p = product("Candy", 2_000, 100_000).also { add(it) }
+        db.catalog().upsertPromo(Promo("pr1", "3 for 50", PromoType.BUNDLE, p.id, 3_000, 5_000, 0, 0, null, null, true, 0))
+        val lines = listOf(CartLineInput(p.id, null, 3000))
+        val on = sales.checkout(req(lines, listOf(PaymentInput(PaymentMethod.CASH, 5_000))).copy(applyPromos = true))
+        assertEquals(5_000L, on.sale.totalCentavos); assertEquals(1_000L, on.sale.discountCentavos)
+        val off = sales.checkout(req(lines, listOf(PaymentInput(PaymentMethod.CASH, 6_000))))
+        assertEquals(6_000L, off.sale.totalCentavos)
+        assertThrows(PosException.PermissionDenied::class.java) { runBlocking { sales.checkout(req(lines, listOf(PaymentInput(PaymentMethod.CASH, 6_000)), discount = 500).copy(applyPromos = true)) } }
+    }
+
+    @Test fun supplierBills_partialPayments_overpayRejected_drawerPaymentHitsZRead() = runBlocking {
+        val pay = PayablesService(db)
+        val bill = pay.addBill(null, null, "DR-77", 100_000, "2026-12-01", null, owner.id)
+        assertThrows(PosException.PermissionDenied::class.java) { runBlocking { pay.addBill(null, null, "x", 100, null, null, helper.id) } }
+        pay.pay(bill.id, 30_000, "GCASH", cashier.id)
+        assertEquals(100_000L, shifts.preview(shift.id, null).expectedCash)                          // GCash payment does not touch the drawer
+        pay.pay(bill.id, 20_000, "CASH_DRAWER", cashier.id)
+        assertEquals(80_000L, shifts.preview(shift.id, null).expectedCash)                           // 100,000 float - 20,000 paid from drawer
+        assertEquals(50_000L, 100_000L - db.catalog().billPaid(bill.id))
+        assertThrows(PosException.Invalid::class.java) { runBlocking { pay.pay(bill.id, 50_001, "BANK", owner.id) } }
+        assertThrows(PosException.Invalid::class.java) { runBlocking { pay.cancel(bill.id, owner.id) } }  // has payments
+    }
+
+    @Test fun assignBarcodes_isUniqueValid_andNeverOverwrites() = runBlocking {
+        val a = product("A", 100, 1).also { add(it) }; val b = product("B", 100, 1).copy(barcode = "4800123").also { add(it) }; val c = product("C", 100, 1).also { add(it) }
+        assertEquals(2, LabelService(db).assignBarcodes(listOf(a.id, b.id, c.id), owner.id))
+        val ca = db.catalog().get(a.id)!!.barcode!!; val cc = db.catalog().get(c.id)!!.barcode!!
+        assertTrue(Ean.isValid(ca) && Ean.isValid(cc)); assertNotEquals(ca, cc); assertEquals("4800123", db.catalog().get(b.id)!!.barcode)
+    }
 }

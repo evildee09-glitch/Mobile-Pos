@@ -15,6 +15,11 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // Licensing (see tools/license-tool.js). Empty public key = licensing OFF, every feature unlocked (developer build).
+        //   ./gradlew assembleRelease -PlicensePublicKey=MFkw... "-PpurchaseInfo=GCash 0917xxxxxxx · Viber same number"
+        fun prop(n: String) = ((project.findProperty(n) as String?) ?: "").replace("\\", "\\\\").replace("\"", "\\\"")
+        buildConfigField("String", "LICENSE_PUBLIC_KEY", "\"${prop("licensePublicKey")}\"")
+        buildConfigField("String", "PURCHASE_INFO", "\"${prop("purchaseInfo")}\"")
     }
     buildTypes {
         release {
@@ -27,7 +32,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     sourceSets["androidTest"].assets.srcDir("$projectDir/schemas")
 }
 
@@ -47,6 +52,7 @@ dependencies {
     implementation("androidx.camera:camera-camera2:1.3.4")
     implementation("androidx.camera:camera-lifecycle:1.3.4")
     implementation("androidx.camera:camera-view:1.3.4")
+    implementation("com.google.android.gms:play-services-auth:21.2.0")   // Google sign-in/consent for Drive backup
     implementation("com.google.mlkit:barcode-scanning:17.3.0")   // bundled model: works offline
     implementation("androidx.room:room-runtime:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")

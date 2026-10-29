@@ -11,7 +11,7 @@ import androidx.room.migration.Migration
         Product::class, ProductUnit::class, Customer::class, Staff::class, Shift::class, CashMovement::class,
         Sale::class, SaleItem::class, Payment::class, LedgerEntry::class, InventoryMovement::class,
         Supplier::class, StockReceipt::class, ShiftClosing::class, AuditLog::class, SyncOutbox::class, AppSetting::class,
-        PurchaseOrder::class, PurchaseOrderLine::class, ReminderLog::class, AppliedEvent::class
+        PurchaseOrder::class, PurchaseOrderLine::class, ReminderLog::class, AppliedEvent::class, ServiceTxn::class, Promo::class, SupplierBill::class, SupplierPayment::class
     ],
     version = 1,
     exportSchema = true

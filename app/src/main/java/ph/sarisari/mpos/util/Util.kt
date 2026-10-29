@@ -59,3 +59,12 @@ object Manila {
         return start until cal.timeInMillis
     }
 }
+
+/** Expiry dates are stored as ISO "yyyy-MM-dd" text (sorts correctly). A product is "expired" the day AFTER its date. */
+object Expiry {
+    fun parse(iso: String?): java.time.LocalDate? = try { iso?.trim()?.takeIf { it.isNotEmpty() }?.let { java.time.LocalDate.parse(it) } } catch (e: Exception) { null }
+    fun today(now: Long = System.currentTimeMillis()): java.time.LocalDate = java.time.Instant.ofEpochMilli(now).atZone(java.time.ZoneId.of("Asia/Manila")).toLocalDate()
+    /** Days from today (Manila) until the date; negative = already expired. null if no/invalid date. */
+    fun daysLeft(iso: String?, now: Long = System.currentTimeMillis()): Long? = parse(iso)?.let { java.time.temporal.ChronoUnit.DAYS.between(today(now), it) }
+    fun label(days: Long) = when { days < 0 -> "Expired ${-days}d ago"; days == 0L -> "Expires today"; days == 1L -> "Expires tomorrow"; else -> "Expires in ${days}d" }
+}
