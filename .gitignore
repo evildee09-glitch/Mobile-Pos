@@ -3,3 +3,7 @@
 /local.properties
 /.idea
 build/
+
+# NEVER commit the license signing key
+license-private.pem
+*.pem

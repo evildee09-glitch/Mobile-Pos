@@ -77,7 +77,6 @@ interface ReceiptPrinter {
 }
 
 /** Generic ESC/POS over Bluetooth SPP (classic). Printer must be paired in Android settings first. UNTESTED on real hardware. */
-/** Generic ESC/POS over Bluetooth SPP (classic). Printer must be paired in Android settings first. UNTESTED on real hardware. */
 class EscPosBluetoothPrinter(private val ctx: Context, private val mac: String) : ReceiptPrinter {
     @SuppressLint("MissingPermission")
     override suspend fun printRaw(bytes: ByteArray): Result<Unit> = withContext(Dispatchers.IO) {
@@ -86,7 +85,7 @@ class EscPosBluetoothPrinter(private val ctx: Context, private val mac: String) 
             val socket = adapter.getRemoteDevice(mac).createRfcommSocketToServiceRecord(UUID.fromString("00001101-0000-1000-8000-00805F9B34FB"))
             adapter.cancelDiscovery()
             socket.use { s -> s.connect(); s.outputStream.apply { write(bytes); flush() } }
-            Unit // Explicitly return Unit
+            Unit        // runCatching must return Unit, not the stream
         }
     }
 
@@ -101,14 +100,13 @@ class EscPosBluetoothPrinter(private val ctx: Context, private val mac: String) 
             socket.use { s ->
                 s.connect()
                 val out = s.outputStream
-                out.write(byteArrayOf(0x1B, 0x40))                                  // init
+                out.write(byteArrayOf(0x1B, 0x40))                          // init
                 out.write(text.replace("₱", "P").toByteArray(Charsets.ISO_8859_1)) // peso sign is not in the default printer code page
                 out.write("\n\n\n".toByteArray())
                 if (openDrawer) out.write(byteArrayOf(0x1B, 0x70, 0x00, 0x19, 0xFA.toByte())) // drawer kick (RJ11 via printer)
                 out.write(byteArrayOf(0x1D, 0x56, 0x42, 0x00))              // partial cut (ignored by printers without cutter)
                 out.flush()
             }
-            Unit // Explicitly return Unit
         }
     }
 }
@@ -116,13 +114,7 @@ class EscPosBluetoothPrinter(private val ctx: Context, private val mac: String) 
 /** ESC/POS over LAN (port 9100) — most Ethernet/Wi-Fi receipt printers. UNTESTED on real hardware. */
 class NetworkEscPosPrinter(private val host: String, private val port: Int = 9100) : ReceiptPrinter {
     override suspend fun printRaw(bytes: ByteArray): Result<Unit> = withContext(Dispatchers.IO) {
-        runCatching { 
-            Socket().use { s -> 
-                s.connect(InetSocketAddress(host, port), 4000)
-                s.getOutputStream().apply { write(bytes); flush() } 
-            }
-            Unit // Explicitly return Unit
-        }
+        runCatching { Socket().use { s -> s.connect(InetSocketAddress(host, port), 4000); s.getOutputStream().apply { write(bytes); flush() } }; Unit }
     }
 
     override suspend fun print(text: String, openDrawer: Boolean): Result<Unit> = withContext(Dispatchers.IO) {
@@ -130,14 +122,10 @@ class NetworkEscPosPrinter(private val host: String, private val port: Int = 910
             Socket().use { s ->
                 s.connect(InetSocketAddress(host, port), 4000)
                 val out = s.getOutputStream()
-                out.write(byteArrayOf(0x1B, 0x40))
-                out.write(text.replace("₱", "P").toByteArray(Charsets.ISO_8859_1))
-                out.write("\n\n\n".toByteArray())
+                out.write(byteArrayOf(0x1B, 0x40)); out.write(text.replace("₱", "P").toByteArray(Charsets.ISO_8859_1)); out.write("\n\n\n".toByteArray())
                 if (openDrawer) out.write(byteArrayOf(0x1B, 0x70, 0x00, 0x19, 0xFA.toByte()))
-                out.write(byteArrayOf(0x1D, 0x56, 0x42, 0x00))
-                out.flush()
+                out.write(byteArrayOf(0x1D, 0x56, 0x42, 0x00)); out.flush()
             }
-            Unit // Explicitly return Unit
         }
     }
 }
