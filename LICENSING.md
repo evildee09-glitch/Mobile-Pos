@@ -14,8 +14,11 @@ Change what is premium in `Feature` / `LicenseState.allows` (`domain/License.kt`
    Each store then gets 30 days from its first sync, after which the server answers 402 unless the app sends a valid license.
 
 ## Selling a license
-`node tools/license-tool.js issue --holder "Aling Nena Store" --days 365` → prints a code. Send it by Viber/SMS; the owner pastes it in
-Settings → Plan & license (or on the lock screen). Codes are signed (ECDSA P-256), checked offline, and cannot be edited.
+`node tools/license-tool.js issue --holder "Aling Nena Store" --days 365` → prints a **short code** like `SS-AVKAC-qiQW…` (about 110–120 characters). Copy it straight to the clipboard on Windows with `| clip`.
+Send it by Viber/SMS; the owner pastes it in Settings → Plan & license (or on the lock screen). Codes are signed (ECDSA P-256), checked offline, and cannot be edited.
+
+- The short code keeps only the first 24 bytes of the holder name; a code with no name is ~97 characters. Add `--long` for the older, longer self-describing format (the app and server accept both).
+- A short code is valid through the END of its expiry day. About 64 of its bytes are the signature, which is why it cannot be much shorter and stay secure offline.
 
 ## Rules built in
 - Selling is never locked. After a license expires there is a **14-day grace period**, then only the premium extras switch off; all data stays readable and exportable.

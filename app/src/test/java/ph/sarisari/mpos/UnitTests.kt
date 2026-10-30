@@ -153,6 +153,27 @@ class LicenseTest {
         assertThrows(PosException.Invalid::class.java) { LicenseVerifier.verify(t, java.util.Base64.getEncoder().encodeToString(other.public.encoded)) }
         assertThrows(PosException.Invalid::class.java) { LicenseVerifier.verify("garbage", pubB64) }
     }
+    private fun derToRaw(der: ByteArray): ByteArray {            // what Node's ieee-p1363 produces
+        var i = 3; val rl = der[i - 1].toInt(); var r = der.copyOfRange(i, i + rl); i += rl + 2; val sl = der[i - 1].toInt(); var s = der.copyOfRange(i, i + sl)
+        fun fix(b: ByteArray): ByteArray { var x = b; while (x.size > 32 && x[0] == 0.toByte()) x = x.copyOfRange(1, x.size); return ByteArray(32 - x.size) + x }
+        return fix(r) + fix(s)
+    }
+    private fun shortToken(day: Int, holder: String = "Aling Nena Store"): String {
+        val payload = byteArrayOf(1, (day shr 8).toByte(), day.toByte(), 0x0b, 0xea.toByte(), 0xa2.toByte()) + holder.toByteArray()
+        val der = java.security.Signature.getInstance("SHA256withECDSA").run { initSign(kp.private); update(payload); sign() }
+        return "SS-" + java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(payload + derToRaw(der))
+    }
+    @Test fun shortCodeVerifies_andRejectsTampering() {
+        repeat(20) {                                                    // repeat: signatures vary in size, exercising the raw->DER padding logic
+            val l = LicenseVerifier.verify(shortToken(20_000), pubB64)
+            assertEquals("Aling Nena Store", l.holder); assertEquals("lic-0beaa2", l.id); assertEquals(20_000L * 86_400 + 86_399, l.expiresAt)
+        }
+        val t = shortToken(20_000); val flipped = t.dropLast(2) + (if (t.last() == 'A') "BB" else "AA")
+        assertThrows(PosException.Invalid::class.java) { LicenseVerifier.verify(flipped, pubB64) }
+        assertThrows(PosException.Invalid::class.java) { LicenseVerifier.verify("SS-abc", pubB64) }
+        val moreDays = java.util.Base64.getUrlDecoder().decode(t.removePrefix("SS-")).also { it[2] = (it[2] + 1).toByte() }
+        assertThrows(PosException.Invalid::class.java) { LicenseVerifier.verify("SS-" + java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(moreDays), pubB64) }   // edited expiry
+    }
     @Test fun policy_trial_premium_grace_free() {
         val lic = LicenseVerifier.Lic("t", "S", "PREMIUM", 0, 1000 * day)
         assertEquals(Plan.UNRESTRICTED, LicensePolicy.evaluate(5, null, null, configured = false).plan)

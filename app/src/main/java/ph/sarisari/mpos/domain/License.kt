@@ -29,7 +29,31 @@ object LicenseVerifier {
     data class Lic(val id: String, val holder: String, val plan: String, val issuedAt: Long, val expiresAt: Long)
 
     /** token = base64url(payload JSON) + "." + base64url(DER ECDSA-P256-SHA256 signature over the first part). Throws if invalid. */
-    fun verify(token: String, publicKeyB64: String): Lic {
+    fun verify(token: String, publicKeyB64: String): Lic = if (token.trim().startsWith("SS-")) verifyShort(token.trim().removePrefix("SS-"), publicKeyB64) else verifyLong(token, publicKeyB64)
+
+    /** Short code: "SS-" + base64url( 0x01 | expiryDay(2 bytes, days since 1970) | id(3 bytes) | holder(UTF-8) | signature(64 bytes raw r||s) ). Valid through the end of the expiry day (UTC). */
+    private fun verifyShort(b64: String, publicKeyB64: String): Lic {
+        val raw = try { Base64.getUrlDecoder().decode(b64) } catch (e: Exception) { throw PosException.Invalid("That is not a license code") }
+        if (raw.size < 6 + 64) throw PosException.Invalid("That is not a license code")
+        val payload = raw.copyOfRange(0, raw.size - 64); val sig = raw.copyOfRange(raw.size - 64, raw.size)
+        val ok = try {
+            val pub = KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(Base64.getDecoder().decode(publicKeyB64)))
+            Signature.getInstance("SHA256withECDSA").run { initVerify(pub); update(payload); verify(rawToDer(sig)) }     // Java wants DER; the code carries raw r||s to stay short
+        } catch (e: Exception) { false }
+        if (!ok) throw PosException.Invalid("Invalid license code")
+        if (payload[0].toInt() != 1) throw PosException.Invalid("This code needs a newer version of the app")
+        val day = ((payload[1].toInt() and 0xFF) shl 8) or (payload[2].toInt() and 0xFF)
+        val id = payload.copyOfRange(3, 6).joinToString("") { "%02x".format(it) }
+        return Lic("lic-$id", String(payload, 6, payload.size - 6, Charsets.UTF_8), "PREMIUM", 0L, day * 86_400L + 86_399L)
+    }
+
+    internal fun rawToDer(sig: ByteArray): ByteArray {
+        fun der(b: ByteArray): ByteArray { var i = 0; while (i < b.size - 1 && b[i] == 0.toByte()) i++; var v = b.copyOfRange(i, b.size); if (v[0] < 0) v = byteArrayOf(0) + v; return byteArrayOf(0x02, v.size.toByte()) + v }
+        val r = der(sig.copyOfRange(0, 32)); val s = der(sig.copyOfRange(32, 64))
+        return byteArrayOf(0x30, (r.size + s.size).toByte()) + r + s
+    }
+
+    private fun verifyLong(token: String, publicKeyB64: String): Lic {
         val parts = token.trim().split(".")
         if (parts.size != 2) throw PosException.Invalid("That is not a license code")
         val ok = try {

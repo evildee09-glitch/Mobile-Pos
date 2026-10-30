@@ -10,16 +10,24 @@ const TRIAL_MS = 30 * 864e5, GRACE_MS = 14 * 864e5, metaFile = path.join(DATA, '
 let meta = {}; try { meta = JSON.parse(fs.readFileSync(metaFile, 'utf8')); } catch (_) {}
 const saveMeta = () => fs.writeFileSync(metaFile, JSON.stringify(meta));
 function getMeta(id) { let m = meta[id]; if (typeof m === 'number') m = meta[id] = { first: m }; if (!m) { m = meta[id] = { first: Date.now() }; saveMeta(); } return m; }
+/** Returns the license expiry (ms) if the code is genuine, else null. Accepts the short "SS-..." code and the older long format. */
+function licenseExp(h) {
+  try {
+    const t = String(h || '').trim();
+    if (t.startsWith('SS-')) {
+      const raw = Buffer.from(t.slice(3), 'base64url'); if (raw.length < 70) return null;
+      const pl = raw.subarray(0, raw.length - 64);
+      return crypto.verify('sha256', pl, { key: LIC_PUB, dsaEncoding: 'ieee-p1363' }, raw.subarray(raw.length - 64)) ? (((pl[1] << 8) | pl[2]) * 86400 + 86399) * 1000 : null;
+    }
+    const [body, sig] = t.split('.');
+    return crypto.verify('sha256', Buffer.from(body), { key: LIC_PUB, dsaEncoding: 'der' }, Buffer.from(sig, 'base64url')) ? JSON.parse(Buffer.from(body, 'base64url')).exp * 1000 : null;
+  } catch (_) { return null; }
+}
 function licenseOk(storeId, header) {
   if (!LIC_PUB) return true;                                                     // enforcement off
   const m = getMeta(storeId);                                                     // trial starts at the store's first request
-  try {
-    const [body, sig] = String(header || '').split('.');
-    if (crypto.verify('sha256', Buffer.from(body), { key: LIC_PUB, dsaEncoding: 'der' }, Buffer.from(sig, 'base64url'))) {
-      const exp = JSON.parse(Buffer.from(body, 'base64url')).exp * 1000;
-      if (Date.now() <= exp + GRACE_MS) { if (m.licExp !== exp) { m.licExp = exp; saveMeta(); } return true; }
-    }
-  } catch (_) {}
+  const exp = licenseExp(header);
+  if (exp && Date.now() <= exp + GRACE_MS) { if (m.licExp !== exp) { m.licExp = exp; saveMeta(); } return true; }
   return Date.now() - m.first < TRIAL_MS;
 }
 /** The owner web view is allowed for stores with a valid (or recently lapsed) license seen on sync, or still in their trial. */
